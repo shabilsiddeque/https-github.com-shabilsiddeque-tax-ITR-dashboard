@@ -270,7 +270,17 @@ def calculate_tax_estimate(
 
     try:
         gross_tax = slab_tax_new_regime(taxable_income)
-        rebate = min(gross_tax, 60_000.0) if enable_87a_rebate and taxable_income <= 1_200_000 else 0.0
+
+        if enable_87a_rebate and taxable_income <= 1_200_000:
+            # Full rebate: taxable income at or below Rs 12L is tax-free (up to Rs 60,000 rebate).
+            rebate = min(gross_tax, 60_000.0)
+        elif enable_87a_rebate and taxable_income > 1_200_000:
+            # Marginal relief: tax on income just above Rs 12L cannot exceed the excess
+            # income itself, until that cap exceeds the normal slab tax (~Rs 12.75L breakeven).
+            excess_income = taxable_income - 1_200_000
+            rebate = (gross_tax - excess_income) if gross_tax > excess_income else 0.0
+        else:
+            rebate = 0.0
         tax_after_rebate = max(gross_tax - rebate, 0.0)
         cess = tax_after_rebate * 0.04
         net_tax = tax_after_rebate + cess
@@ -1526,10 +1536,58 @@ def render_guidance() -> None:
     )
 
 
+def check_access() -> bool:
+    """Simple passcode gate so the app isn't freely usable by anyone with the link.
+
+    Set an ACCESS_CODE value in Streamlit Cloud's Secrets manager
+    (App settings -> Secrets) like this:
+
+        ACCESS_CODE = "your-chosen-code"
+
+    Share that code only with users who have paid / been granted access.
+    This is a stopgap, not real authentication or payment enforcement.
+    """
+    configured_code = st.secrets.get("ACCESS_CODE", None)
+
+    if not configured_code:
+        # No code configured yet in Secrets -> app stays open.
+        # Add ACCESS_CODE to Secrets once you're ready to gate access.
+        return True
+
+    if st.session_state.get("access_granted", False):
+        return True
+
+    st.markdown(
+        """
+        <div class="step-card">
+            <span>Access required</span>
+            <strong>Enter your access code to continue</strong>
+            <p>This dashboard is limited to authorized users.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    entered_code = st.text_input("Access code", type="password", key="access_code_input")
+    submit = st.button("Unlock")
+
+    if submit:
+        if entered_code == configured_code:
+            st.session_state["access_granted"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect access code. Please try again or contact the app owner.")
+
+    return False
+
+
 def main() -> None:
     """Application entry point."""
 
     configure_page()
+
+    if not check_access():
+        st.stop()
+
     profile = render_sidebar()
     render_hero()
     render_design_workspace(profile)
