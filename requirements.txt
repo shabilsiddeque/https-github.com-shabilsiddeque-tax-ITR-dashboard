@@ -9,4 +9,5 @@ pandas
 numpy
 plotly
 pypdf
+fpdf2
 google-genai
