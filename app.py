@@ -155,6 +155,24 @@ def extract_pdf_preview(uploaded_file) -> str:
         return "PDF uploaded. Text preview could not be extracted."
 
 
+def extract_pdf_full_text(uploaded_file, max_pages: int = 8, max_chars: int = 8_000) -> str:
+    """Extract more complete text from a PDF for structured data extraction (e.g. Form 16)."""
+
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(uploaded_file)
+        pages = []
+        for page in reader.pages[:max_pages]:
+            pages.append(page.extract_text() or "")
+        text = "\n".join(pages).strip()
+        return text[:max_chars]
+    except ModuleNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+
 def standardize_transactions(raw_frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     """Merge and standardize uploaded transaction tables."""
 
@@ -1114,10 +1132,36 @@ def render_sidebar() -> Dict[str, object]:
         )
 
         st.divider()
+        st.subheader("Form 16 auto-fill")
+        st.caption("Salaried individuals: upload Form 16 to auto-fill salary and TDS figures below.")
+        form16_file = st.file_uploader("Upload Form 16 (PDF)", type=["pdf"], key="form16_upload")
+
+        if form16_file is not None and st.button("Extract from Form 16", key="form16_extract_btn"):
+            pdf_text = extract_pdf_full_text(form16_file)
+            with st.spinner("Reading Form 16..."):
+                data, message = extract_form16_data(pdf_text)
+            if data:
+                st.session_state["in_other_income"] = max(data["gross_salary"] - data["standard_deduction"], 0.0)
+                st.session_state["in_deductions"] = max(data["other_deductions"], 0.0)
+                st.session_state["in_prepaid_tax"] = max(data["tds_deducted"], 0.0)
+                st.success(
+                    f"{message} Employer: {data['employer_name'] or 'not detected'} | "
+                    f"Gross salary: {money(data['gross_salary'])} | TDS: {money(data['tds_deducted'])}"
+                )
+            else:
+                st.warning(message)
+
+        st.divider()
         st.subheader("Quick Money Inputs")
-        other_income = st.number_input("Other income, if any", min_value=0.0, value=0.0, step=5_000.0)
-        deductions = st.number_input("Basic deductions you want to track", min_value=0.0, value=0.0, step=5_000.0)
-        prepaid_tax = st.number_input("TDS + advance tax already paid", min_value=0.0, value=0.0, step=5_000.0)
+        other_income = st.number_input(
+            "Other income, if any", min_value=0.0, value=0.0, step=5_000.0, key="in_other_income"
+        )
+        deductions = st.number_input(
+            "Basic deductions you want to track", min_value=0.0, value=0.0, step=5_000.0, key="in_deductions"
+        )
+        prepaid_tax = st.number_input(
+            "TDS + advance tax already paid", min_value=0.0, value=0.0, step=5_000.0, key="in_prepaid_tax"
+        )
         enable_rebate = st.checkbox("Apply 87A rebate check", value=True)
 
         st.divider()
@@ -1421,9 +1465,281 @@ def render_review_step(transactions: pd.DataFrame) -> Tuple[float, float, float]
     return income, expenses, regular_profit
 
 
+# =============================================================================
+# CA Assist: AI Jargon Explainer, Form 16 Auto-fill, Ledger Analysis
+# =============================================================================
+
+def get_anthropic_client():
+    """Return a configured Anthropic client, or None if no key is set / package missing."""
+
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
+    if not api_key:
+        return None
+    try:
+        import anthropic
+
+        return anthropic.Anthropic(api_key=api_key)
+    except ModuleNotFoundError:
+        return None
+
+
+def extract_form16_data(pdf_text: str) -> Tuple[Optional[Dict[str, float]], str]:
+    """Use AI to pull key salary/TDS figures out of a Form 16 PDF's extracted text.
+
+    Returns (data, message). data is None if extraction failed or no key is configured;
+    message explains what happened (setup instructions, parse failure, or success note).
+    Numbers returned here are estimates from AI reading of the document text and should
+    always be reviewed before filing.
+    """
+    if not pdf_text.strip():
+        return None, "Could not read any text from this PDF. It may be a scanned image without selectable text."
+
+    client = get_anthropic_client()
+    if client is None:
+        return None, (
+            "Form 16 auto-fill isn't set up yet. Add ANTHROPIC_API_KEY under "
+            "Streamlit Cloud's App settings -> Secrets, and add \"anthropic\" to requirements.txt."
+        )
+
+    system_prompt = (
+        "You extract figures from Indian Form 16 (salary TDS certificate) text. "
+        "Read the text and return ONLY a JSON object, no other words, with these keys: "
+        '{"gross_salary": number, "standard_deduction": number, "tds_deducted": number, '
+        '"other_deductions": number, "employer_name": string}. '
+        "Use 0 for any figure you cannot find. Do not guess figures that are not clearly present. "
+        "Return valid JSON only, no markdown fences, no explanation text."
+    )
+
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            system=system_prompt,
+            messages=[{"role": "user", "content": f"Form 16 text:\n{pdf_text}"}],
+        )
+        raw = "".join(block.text for block in message.content if hasattr(block, "text")).strip()
+        raw = raw.strip("`").removeprefix("json").strip()
+        parsed = json.loads(raw)
+
+        data = {
+            "gross_salary": float(parsed.get("gross_salary", 0) or 0),
+            "standard_deduction": float(parsed.get("standard_deduction", 0) or 0),
+            "tds_deducted": float(parsed.get("tds_deducted", 0) or 0),
+            "other_deductions": float(parsed.get("other_deductions", 0) or 0),
+            "employer_name": str(parsed.get("employer_name", "") or ""),
+        }
+        return data, "Extracted successfully. Please review the figures below before they're applied."
+    except json.JSONDecodeError:
+        return None, "The AI response could not be read as figures. Please enter your Form 16 details manually."
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Could not process this Form 16 right now. ({type(exc).__name__}) Please try again or enter manually."
+
+
+def summarize_ledger_for_ca(transactions: pd.DataFrame, question: str) -> str:
+    """Let a CA ask analytical questions about a larger/messier uploaded ledger.
+
+    Sends aggregated statistics (not the raw row-by-row ledger) to keep token usage
+    and cost bounded even for large company datasets.
+    """
+    question = (question or "").strip()
+    if not question:
+        return "Type a question about this ledger first, e.g. \"What looks unusual here?\""
+    if len(question) > 400:
+        return "That question is a bit long — please shorten it to a single, specific question."
+    if transactions.empty:
+        return "No transaction data is loaded yet — upload files in step 1 first."
+
+    client = get_anthropic_client()
+    if client is None:
+        return (
+            "Ledger analysis isn't set up yet. Add ANTHROPIC_API_KEY under "
+            "Streamlit Cloud's App settings -> Secrets to turn this on."
+        )
+
+    try:
+        by_category = (
+            transactions.groupby(["type", "category"])["absolute_amount"].sum().round(0).astype(int).to_dict()
+        )
+        monthly = transactions.copy()
+        monthly["month"] = pd.to_datetime(monthly["date"]).dt.to_period("M").astype(str)
+        monthly_totals = monthly.groupby(["month", "type"])["absolute_amount"].sum().round(0).astype(int).to_dict()
+
+        summary_text = (
+            f"Total transactions: {len(transactions)}\n"
+            f"By type and category (absolute amount): {by_category}\n"
+            f"By month and type (absolute amount): {monthly_totals}\n"
+        )
+
+        system_prompt = (
+            "You are a data assistant helping a Chartered Accountant review an aggregated "
+            "summary of a client's business ledger (categorized totals only, not raw transactions). "
+            "Answer the CA's question using only the aggregated figures given. Point out patterns, "
+            "concentration, or anomalies where relevant (e.g. a category or month that stands out). "
+            "Never state an exact transaction-level fact you were not given. Keep the answer under "
+            "6 sentences and avoid restating the raw numbers back verbatim if a short observation is clearer."
+        )
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Ledger summary:\n{summary_text}\n\nCA's question: {question}",
+                }
+            ],
+        )
+        reply = "".join(block.text for block in message.content if hasattr(block, "text")).strip()
+        return reply or "No analysis was returned. Please try rephrasing the question."
+    except Exception as exc:  # noqa: BLE001
+        return f"Could not analyze this ledger right now. Please try again in a moment. ({type(exc).__name__})"
+
+
+COMMON_JARGON_QUESTIONS = [
+    "What is the 87A rebate?",
+    "What does presumptive income mean?",
+    "Why is there a Health and Education cess?",
+    "Should I file ITR-3 or ITR-4?",
+]
+
+
+def explain_tax_term(question: str, context: Dict[str, str]) -> str:
+    """Explain a tax term/question in plain language, grounded only in the client's own figures.
+
+    This lets a CA hand the dashboard to a client so the client can self-serve
+    jargon explanations, instead of the CA re-explaining the same terms every season.
+
+    Requires ANTHROPIC_API_KEY in Streamlit Cloud's Secrets manager. Without it,
+    this returns setup instructions instead of failing silently.
+    """
+    question = (question or "").strip()
+    if not question:
+        return "Type a question first, e.g. \"What does 87A rebate mean for me?\""
+    if len(question) > 300:
+        return "That question is a bit long — please shorten it to a single, specific question."
+
+    client = get_anthropic_client()
+    if client is None:
+        return (
+            "The AI explainer isn't set up yet. Add ANTHROPIC_API_KEY under "
+            "Streamlit Cloud's App settings -> Secrets, and add \"anthropic\" to requirements.txt."
+        )
+
+    try:
+        context_text = "\n".join(f"- {label}: {value}" for label, value in context.items())
+        system_prompt = (
+            "You explain Indian income-tax jargon in plain language inside a small-business "
+            "ITR preparation dashboard, used by a Chartered Accountant with their client. "
+            "Only use the figures given to you below -- never invent, guess, or recompute a number. "
+            "If the question needs a number that isn't provided, say the client's CA should confirm it. "
+            "Answer in 3-5 short sentences, avoid jargon in your own explanation, and do not give filing "
+            "advice or legal opinions beyond explaining what a term or figure means."
+        )
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=350,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Client's current figures on screen:\n{context_text}\n\nClient's question: {question}",
+                }
+            ],
+        )
+        reply = "".join(block.text for block in message.content if hasattr(block, "text")).strip()
+        return reply or "No explanation was returned. Please try rephrasing the question."
+    except ModuleNotFoundError:
+        return "The 'anthropic' package isn't installed. Add \"anthropic\" to requirements.txt and redeploy."
+    except Exception as exc:  # noqa: BLE001 - surface a friendly message, not a raw traceback
+        return f"Could not fetch an explanation right now. Please try again in a moment. ({type(exc).__name__})"
+
+
+def render_ca_assistant(
+    profile: Dict[str, object],
+    estimate: TaxEstimate,
+    presumptive_income: float,
+    regular_profit: float,
+    transactions: pd.DataFrame,
+) -> None:
+    """Render a CA-facing jargon explainer plus a ledger-analysis tool for larger/complex data."""
+
+    st.markdown("#### CA Assist: plain-language explainer")
+    st.caption(
+        "Let your client ask about any term or number on this screen themselves — "
+        "answers stay grounded in their own figures, so you don't have to repeat the same explanations."
+    )
+
+    context = {
+        "Filing path": str(profile.get("itr_path", "")),
+        "Taxable income": money(estimate.taxable_income),
+        "Gross tax (before rebate)": money(estimate.gross_tax),
+        "87A rebate applied": money(estimate.rebate_87a),
+        "Health and education cess": money(estimate.cess),
+        "Net tax": money(estimate.net_tax),
+        "TDS / advance tax already paid": money(float(profile.get("prepaid_tax", 0.0))),
+        "Balance payable": money(estimate.balance_payable),
+        "Presumptive income (44AD/44ADA)": money(presumptive_income),
+        "Regular book profit": money(regular_profit),
+    }
+
+    quick_cols = st.columns(len(COMMON_JARGON_QUESTIONS))
+    quick_pick = None
+    for col, term in zip(quick_cols, COMMON_JARGON_QUESTIONS):
+        with col:
+            if st.button(term, key=f"quick_{term}", use_container_width=True):
+                quick_pick = term
+
+    typed_question = st.text_input(
+        "Or ask your own question about this page",
+        placeholder="e.g. Why is my tax higher than last year?",
+        key="ca_assist_question",
+    )
+
+    ask_clicked = st.button("Explain this", key="ca_assist_ask")
+
+    active_question = quick_pick or (typed_question if ask_clicked else None)
+
+    if active_question:
+        cache_key = f"ca_assist_cache::{active_question}::{estimate.net_tax}"
+        if cache_key not in st.session_state:
+            with st.spinner("Getting a plain-language explanation..."):
+                st.session_state[cache_key] = explain_tax_term(active_question, context)
+        answer = st.session_state[cache_key]
+        st.markdown(f"""<div class="info-box">{escape(answer)}</div>""", unsafe_allow_html=True)
+
+    st.caption(
+        "This explains terms and figures already shown on this page. It is not a substitute "
+        "for the CA's own review or advice."
+    )
+
+    st.divider()
+    st.markdown("#### CA data assistant: analyze a larger ledger")
+    st.caption(
+        "For bigger or messier company data — ask about patterns, concentration, or anything worth "
+        "a second look. Only category-level totals are sent, not raw transaction rows, to keep this fast and cheap."
+    )
+    ledger_question = st.text_input(
+        "Ask about this uploaded ledger",
+        placeholder="e.g. Which expense category grew the most this year?",
+        key="ca_ledger_question",
+    )
+    ledger_ask_clicked = st.button("Analyze ledger", key="ca_ledger_ask")
+
+    if ledger_ask_clicked and ledger_question:
+        ledger_cache_key = f"ca_ledger_cache::{ledger_question}::{len(transactions)}"
+        if ledger_cache_key not in st.session_state:
+            with st.spinner("Analyzing ledger..."):
+                st.session_state[ledger_cache_key] = summarize_ledger_for_ca(transactions, ledger_question)
+        st.markdown(
+            f"""<div class="info-box">{escape(st.session_state[ledger_cache_key])}</div>""",
+            unsafe_allow_html=True,
+        )
+
+
 def render_tax_step(
     profile: Dict[str, object],
     regular_profit: float,
+    transactions: pd.DataFrame,
 ) -> Tuple[float, TaxEstimate, List[str]]:
     """Render presumptive helper and final tax estimate."""
 
@@ -1481,6 +1797,9 @@ def render_tax_step(
             use_container_width=True,
             hide_index=True,
         )
+
+    st.divider()
+    render_ca_assistant(profile, estimate, presumptive_income, regular_profit, transactions)
 
     return presumptive_income, estimate, notes
 
@@ -1662,7 +1981,7 @@ def main() -> None:
         del income, expenses
 
     with tabs[2]:
-        presumptive_income, estimate, _notes = render_tax_step(profile, regular_profit)
+        presumptive_income, estimate, _notes = render_tax_step(profile, regular_profit, transactions)
 
     with tabs[3]:
         render_finish_step(profile, transactions, regular_profit, presumptive_income, estimate, pdf_previews)
