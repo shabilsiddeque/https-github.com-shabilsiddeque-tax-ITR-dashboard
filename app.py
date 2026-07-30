@@ -1,14 +1,13 @@
 """
-Beginner Tax Desk & CA Assist: Small-business & Individual Tax Preparation Platform.
+Beginner Tax Desk & CA Assist Platform (FY 2025-26 / AY 2026-27)
 
-Calculates income tax strictly based on current Indian Income Tax rules for
-Financial Year 2025-26 / Assessment Year 2026-27 under both the New Tax Regime
-(u/s 115BAC) and the Old Tax Regime, featuring AI tools for Chartered Accountants.
+A UI/UX tax platform featuring:
+- Fluid motion & glassmorphism styling
+- Ingestion for Form 16, bank statements, & AIS
+- Legal Old vs New Regime calculation (FY 2025-26 / AY 2026-27)
+- AI Audit & Regime Optimization (via Google Gemini 2.5 Flash)
+- Provenance Audit Trail (Live Step-by-Step execution pipeline)
 """
-
-# =============================================================================
-# Imports
-# =============================================================================
 
 from __future__ import annotations
 
@@ -16,6 +15,7 @@ import io
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from html import escape
@@ -29,23 +29,16 @@ import streamlit as st
 
 
 # =============================================================================
-# Configuration & Constants (FY 2025-26 / AY 2026-27)
+# App Configuration & Legal Slabs (FY 2025-26 / AY 2026-27)
 # =============================================================================
 
 APP_TITLE = "Beginner Tax Desk & CA Assist"
-APP_SUBTITLE = "Smart ITR preparation & CA AI workbench for FY 2025-26 (AY 2026-27)"
+APP_SUBTITLE = "Smart ITR preparation, AI auditing, and legal regime optimization"
 ASSESSMENT_YEAR = "AY 2026-27"
 FINANCIAL_YEAR = "FY 2025-26"
 FY_START_YEAR = "2025"
 
-OFFICIAL_SOURCES = {
-    "Income Tax Portal": "https://www.incometax.gov.in",
-    "ITR-4 FAQ & Guidance": "https://www.incometax.gov.in/iec/foportal/help/e-filing-itr4-form-sugam-faq",
-    "Business & Profession ITR Guide": "https://www.incometax.gov.in/iec/foportal/help/individual-business-profession",
-    "ITR Downloads": "https://www.incometax.gov.in/iec/foportal/downloads/income-tax-returns",
-}
-
-# New Tax Regime Slabs (FY 2025-26 u/s 115BAC)
+# New Tax Regime Slabs (u/s 115BAC) - FY 2025-26
 NEW_REGIME_SLABS: List[Tuple[float, float, float]] = [
     (0, 400_000, 0.00),
     (400_000, 800_000, 0.05),
@@ -77,16 +70,16 @@ CATEGORY_RULES = {
 }
 
 REQUIRED_CHECKLIST = [
-    "PAN and Aadhaar linking status",
-    "Bank account details & active IFSCs",
-    "Form 16 (Part A & Part B) / Salary slips",
-    "Annual Information Statement (AIS) / TIS verification",
+    "PAN and Aadhaar linking verified",
+    "Active bank account details with valid IFSC",
+    "Form 16 (Part A & Part B) or monthly salary slips",
+    "Annual Information Statement (AIS) / TIS cross-verification",
     "Form 26AS tax credit reconciliation",
     "Bank statements for full FY 2025-26",
-    "Proof of Chapter VI-A deductions (80C, 80D, 80CCD)",
-    "HRA rent receipts, lease agreement & landlord PAN",
-    "Sales invoices / GST returns reconciliation (for business)",
-    "Advance tax and TDS payment challans",
+    "Deduction proofs for Chapter VI-A (80C, 80D, 80CCD)",
+    "HRA receipts, rent agreement, and landlord details",
+    "GST returns vs sales register reconciliation (for businesses)",
+    "Challan receipts for advance tax and self-assessment tax",
 ]
 
 
@@ -105,11 +98,24 @@ class TaxEstimate:
 
 
 # =============================================================================
-# Formatters & Helpers
+# Helper Utilities & Execution Logger
 # =============================================================================
 
+def add_audit_log(stage: str, details: str, status: str = "INFO") -> None:
+    """Record execution milestones for transparent data provenance."""
+    if "audit_trail" not in st.session_state:
+        st.session_state["audit_trail"] = []
+    timestamp = time.strftime("%H:%M:%S")
+    st.session_state["audit_trail"].append({
+        "time": timestamp,
+        "stage": stage,
+        "details": details,
+        "status": status,
+    })
+
+
 def money(value: float) -> str:
-    """Format Indian Rupee values."""
+    """Format currency values into Indian Rupees."""
     try:
         return f"₹{value:,.0f}"
     except Exception:
@@ -117,13 +123,11 @@ def money(value: float) -> str:
 
 
 def normalize_column_name(column: object) -> str:
-    """Standardize column names to snake_case."""
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", str(column).strip().lower())
     return cleaned.strip("_")
 
 
 def infer_category(description: str, amount: float) -> str:
-    """Auto-categorize transactions using keyword matching."""
     text = str(description).lower()
     for category, keywords in CATEGORY_RULES.items():
         if any(keyword in text for keyword in keywords):
@@ -134,7 +138,6 @@ def infer_category(description: str, amount: float) -> str:
 
 
 def read_uploaded_table(uploaded_file) -> pd.DataFrame:
-    """Read CSV or Excel uploaded file."""
     try:
         file_name = uploaded_file.name.lower()
         if file_name.endswith(".csv"):
@@ -143,44 +146,23 @@ def read_uploaded_table(uploaded_file) -> pd.DataFrame:
             return pd.read_excel(uploaded_file)
         return pd.DataFrame()
     except Exception as exc:
-        st.warning(f"Could not read {uploaded_file.name}. Please verify format.")
+        add_audit_log("File Parsing", f"Error reading {uploaded_file.name}: {exc}", "ERROR")
         return pd.DataFrame()
 
 
-def extract_pdf_preview(uploaded_file) -> str:
-    """Extract a short preview from PDF files."""
-    try:
-        from pypdf import PdfReader
-
-        reader = PdfReader(uploaded_file)
-        pages = []
-        for page in reader.pages[:2]:
-            pages.append(page.extract_text() or "")
-        text = "\n".join(pages).strip()
-        return text[:1_200] if text else "PDF uploaded. No selectable text found."
-    except ModuleNotFoundError:
-        return "PDF uploaded. Install pypdf to enable text preview."
-    except Exception:
-        return "PDF uploaded. Text preview unavailable."
-
-
 def extract_pdf_full_text(uploaded_file, max_pages: int = 10, max_chars: int = 10_000) -> str:
-    """Extract readable text from uploaded PDFs."""
     try:
         from pypdf import PdfReader
-
         reader = PdfReader(uploaded_file)
-        pages = []
-        for page in reader.pages[:max_pages]:
-            pages.append(page.extract_text() or "")
+        pages = [page.extract_text() or "" for page in reader.pages[:max_pages]]
         text = "\n".join(pages).strip()
         return text[:max_chars]
-    except Exception:
+    except Exception as exc:
+        add_audit_log("PDF Extraction", f"Failed reading PDF: {exc}", "WARN")
         return ""
 
 
 def standardize_transactions(raw_frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
-    """Merge and clean transaction tables."""
     try:
         frames = []
         for frame in raw_frames:
@@ -219,43 +201,41 @@ def standardize_transactions(raw_frames: Iterable[pd.DataFrame]) -> pd.DataFrame
 
         transactions = pd.concat(frames, ignore_index=True)
         transactions["date"] = transactions["date"].fillna(pd.Timestamp(f"{FY_START_YEAR}-04-01"))
+        add_audit_log("Data Sanitization", f"Processed {len(transactions)} transaction records into unified schema.", "SUCCESS")
         return transactions.sort_values("date").reset_index(drop=True)
-    except Exception:
+    except Exception as exc:
+        add_audit_log("Data Sanitization", f"Fallback to sample data due to: {exc}", "WARN")
         return make_sample_transactions()
 
 
 @st.cache_data(show_spinner=False)
 def make_sample_transactions() -> pd.DataFrame:
-    """Create sample business ledger for initial preview."""
-    try:
-        rng = np.random.default_rng(42)
-        months = pd.date_range("2025-04-01", periods=12, freq="MS")
-        rows = []
-        for month in months:
-            sales = rng.integers(110_000, 190_000)
-            rows.extend([
-                (month + pd.Timedelta(days=2), "Client UPI receipt", float(sales)),
-                (month + pd.Timedelta(days=5), "Raw material purchase", -float(sales * 0.35)),
-                (month + pd.Timedelta(days=10), "Commercial shop rent", -22_000.0),
-                (month + pd.Timedelta(days=15), "Electricity and high-speed internet", -7_500.0),
-                (month + pd.Timedelta(days=22), "Digital marketing & ads", -5_000.0),
-            ])
+    rng = np.random.default_rng(101)
+    months = pd.date_range("2025-04-01", periods=12, freq="MS")
+    rows = []
+    for month in months:
+        sales = rng.integers(120_000, 210_000)
+        rows.extend([
+            (month + pd.Timedelta(days=2), "Client UPI Credit Payment", float(sales)),
+            (month + pd.Timedelta(days=5), "Inventory & Raw Materials Purchase", -float(sales * 0.36)),
+            (month + pd.Timedelta(days=10), "Commercial Office Rent", -25_000.0),
+            (month + pd.Timedelta(days=15), "High-speed Broadband & Electricity", -8_200.0),
+            (month + pd.Timedelta(days=22), "Google Ads & Social Media Marketing", -6_500.0),
+        ])
 
-        sample = pd.DataFrame(rows, columns=["date", "description", "amount"])
-        sample["type"] = np.where(sample["amount"] >= 0, "Income", "Expense")
-        sample["category"] = [infer_category(d, a) for d, a in zip(sample["description"], sample["amount"])]
-        sample["absolute_amount"] = sample["amount"].abs()
-        return sample
-    except Exception:
-        return pd.DataFrame(columns=["date", "description", "amount", "type", "category", "absolute_amount"])
+    sample = pd.DataFrame(rows, columns=["date", "description", "amount"])
+    sample["type"] = np.where(sample["amount"] >= 0, "Income", "Expense")
+    sample["category"] = [infer_category(d, a) for d, a in zip(sample["description"], sample["amount"])]
+    sample["absolute_amount"] = sample["amount"].abs()
+    return sample
 
 
 # =============================================================================
-# Legal Income Tax Calculation Engine (FY 2025-26 / AY 2026-27)
+# Income Tax Calculation Engine (FY 2025-26 / AY 2026-27)
 # =============================================================================
 
 def calculate_new_regime_tax(gross_income: float, is_salaried: bool, prepaid_tax: float) -> TaxEstimate:
-    """Calculate tax under NEW TAX REGIME (u/s 115BAC) for FY 2025-26 / AY 2026-27."""
+    """Calculates tax under NEW TAX REGIME (u/s 115BAC) for FY 2025-26."""
     std_deduction = 75_000.0 if is_salaried else 0.0
     taxable_income = max(gross_income - std_deduction, 0.0)
 
@@ -265,11 +245,10 @@ def calculate_new_regime_tax(gross_income: float, is_salaried: bool, prepaid_tax
             slice_amt = min(taxable_income, upper) - lower
             gross_tax += slice_amt * rate
 
-    # Rebate u/s 87A: Income up to ₹12 Lakh gets rebate up to ₹60,000 (tax free)
+    # Rebate u/s 87A (New Regime): Income up to ₹12 Lakh gets up to ₹60,000 rebate
     if taxable_income <= 1_200_000:
         rebate = min(gross_tax, 60_000.0)
     elif taxable_income > 1_200_000:
-        # Marginal relief for income slightly exceeding ₹12,00,000
         excess_income = taxable_income - 1_200_000
         rebate = (gross_tax - excess_income) if gross_tax > excess_income else 0.0
     else:
@@ -305,7 +284,7 @@ def calculate_old_regime_tax(
     other_deductions: float,
     prepaid_tax: float,
 ) -> TaxEstimate:
-    """Calculate tax under OLD TAX REGIME for FY 2025-26 / AY 2026-27."""
+    """Calculates tax under OLD TAX REGIME for FY 2025-26."""
     std_deduction = 50_000.0 if is_salaried else 0.0
     total_80c = min(max(sec_80c, 0.0), 150_000.0)
     total_80ccd = min(max(sec_80ccd_1b, 0.0), 50_000.0)
@@ -320,7 +299,7 @@ def calculate_old_regime_tax(
             slice_amt = min(taxable_income, upper) - lower
             gross_tax += slice_amt * rate
 
-    # Rebate u/s 87A under Old Regime: Income up to ₹5 Lakh gets rebate up to ₹12,500
+    # Rebate u/s 87A (Old Regime): Income up to ₹5 Lakh gets up to ₹12,500 rebate
     if taxable_income <= 500_000:
         rebate = min(gross_tax, 12_500.0)
     else:
@@ -346,39 +325,11 @@ def calculate_old_regime_tax(
     )
 
 
-def estimate_presumptive_income(
-    digital_receipts: float,
-    cash_receipts: float,
-    professional_receipts: float,
-    mode: str,
-) -> Tuple[float, List[str]]:
-    """Calculate 44AD / 44ADA Presumptive Income."""
-    notes = []
-    business_turnover = digital_receipts + cash_receipts
-
-    if mode == "Business 44AD":
-        income = (digital_receipts * 0.06) + (cash_receipts * 0.08)
-        if business_turnover > 30_000_000 and cash_receipts <= business_turnover * 0.05:
-            notes.append("Turnover exceeds Section 44AD enhanced threshold of ₹3 Crore.")
-        elif business_turnover > 20_000_000 and cash_receipts > business_turnover * 0.05:
-            notes.append("Cash receipts exceed 5%; standard 44AD limit is ₹2 Crore.")
-        return income, notes
-
-    if mode == "Profession 44ADA":
-        income = professional_receipts * 0.50
-        if professional_receipts > 7_500_000:
-            notes.append("Professional receipts exceed Section 44ADA limit of ₹75 Lakh.")
-        return income, notes
-
-    return 0.0, notes
-
-
 # =============================================================================
-# Google Gemini 2.5 Flash Free AI Helpers (`google-genai` SDK)
+# Google Gemini 2.5 Flash Free AI Integration
 # =============================================================================
 
 def get_gemini_client():
-    """Initialize free Gemini AI client."""
     api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY", None)
     if not api_key:
         return None
@@ -389,39 +340,36 @@ def get_gemini_client():
         return None
 
 
-def ai_parse_form16_or_document(doc_text: str) -> Tuple[Optional[Dict[str, float]], str]:
-    """Parse Form 16 / Salary Slip / Document using Gemini 2.5 Flash."""
+def ai_parse_document(doc_text: str) -> Tuple[Optional[Dict[str, float]], str]:
     if not doc_text.strip():
-        return None, "No readable text found in uploaded document."
+        return None, "No readable text found in PDF."
 
     client = get_gemini_client()
     if client is None:
-        return None, "GEMINI_API_KEY is not configured in Streamlit Secrets."
+        return None, "GEMINI_API_KEY is not configured in Secrets."
 
     try:
         from google.genai import types
 
         prompt = f"""
-        You are an Indian Income Tax document extractor. Parse this text from a Form 16 / Salary Slip / AIS.
+        Extract key Indian Income Tax fields from this document text.
         Return ONLY a JSON object with these exact numeric keys:
         - "gross_salary": gross salary or income (numeric)
-        - "standard_deduction": standard deduction mentioned if any (numeric)
-        - "hra_exemption": HRA exemption u/s 10(13A) if any (numeric)
-        - "sec_80c": Section 80C deductions (PPF, EPF, ELSS, LIC, tuition fee) (numeric)
+        - "standard_deduction": standard deduction if mentioned (numeric)
+        - "hra_exemption": HRA exemption u/s 10(13A) (numeric)
+        - "sec_80c": Section 80C deductions (PPF, ELSS, LIC, tuition fee) (numeric)
         - "sec_80d": Section 80D health insurance (numeric)
-        - "tds_deducted": Total TDS / Tax deducted at source (numeric)
-        - "employer_name": name of company or employer (string)
+        - "tds_deducted": Total TDS deducted at source (numeric)
+        - "employer_name": Employer or company name (string)
 
-        Document Text:
+        Document Content:
         {doc_text[:8000]}
         """
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
 
         parsed = json.loads(response.text)
@@ -434,31 +382,32 @@ def ai_parse_form16_or_document(doc_text: str) -> Tuple[Optional[Dict[str, float
             "tds_deducted": float(parsed.get("tds_deducted", 0) or 0),
             "employer_name": str(parsed.get("employer_name", "") or "Detected Employer"),
         }
-        return data, "Extracted successfully via Gemini AI."
+        add_audit_log("AI Document Ingestion", f"Successfully extracted tax parameters for employer: {data['employer_name']}", "SUCCESS")
+        return data, "Extracted successfully using Gemini AI."
     except Exception as exc:
+        add_audit_log("AI Document Ingestion", f"Extraction failed: {exc}", "ERROR")
         return None, f"Document AI extraction error: {type(exc).__name__}"
 
 
-def ai_recommend_regime(new_est: TaxEstimate, old_est: TaxEstimate, gross_salary: float) -> str:
-    """Generate intelligent regime comparison advisory using Gemini."""
+def ai_recommend_regime(new_est: TaxEstimate, old_est: TaxEstimate, total_gross: float) -> str:
     client = get_gemini_client()
     diff = abs(new_est.net_tax - old_est.net_tax)
-    better = "New Tax Regime" if new_est.net_tax < old_est.net_tax else "Old Tax Regime"
+    better = "New Tax Regime" if new_est.net_tax <= old_est.net_tax else "Old Tax Regime"
 
     if client is None:
-        return f"**Recommendation:** **{better}** saves you {money(diff)} in net tax for FY 2025-26."
+        return f"**Analysis:** **{better}** is optimal for your profile, saving you {money(diff)} in net tax liability."
 
     try:
         prompt = f"""
-        You are a senior Chartered Accountant in India reviewing a client's tax figures for FY 2025-26 (AY 2026-27).
-        Gross Income: {money(gross_salary)}
-        New Regime Tax Liability: {money(new_est.net_tax)} (Deductions: {money(new_est.deductions_applied)})
-        Old Regime Tax Liability: {money(old_est.net_tax)} (Deductions: {money(old_est.deductions_applied)})
+        You are a senior Chartered Accountant reviewing tax liabilities for FY 2025-26 (AY 2026-27).
+        Gross Annual Income: {money(total_gross)}
+        New Regime Net Tax: {money(new_est.net_tax)} (Deductions: {money(new_est.deductions_applied)})
+        Old Regime Net Tax: {money(old_est.net_tax)} (Deductions: {money(old_est.deductions_applied)})
 
-        Explain clearly in 3-4 bullet points:
-        1. Which regime is better and the exact net savings ({money(diff)}).
-        2. Key reason for the difference (e.g. 87A rebate limit of ₹12L in New Regime vs 80C/80D in Old).
-        3. Practical action advice for the CA or client before filing ITR.
+        Provide a concise 3-bullet comparison:
+        1. Winning regime and exact savings ({money(diff)}).
+        2. Primary driver (e.g., Section 87A ₹12L slab threshold vs Chapter VI-A deductions).
+        3. Strategic advice for the upcoming filing.
         """
 
         response = client.models.generate_content(
@@ -467,17 +416,16 @@ def ai_recommend_regime(new_est: TaxEstimate, old_est: TaxEstimate, gross_salary
         )
         return response.text or f"Recommend {better} with savings of {money(diff)}."
     except Exception:
-        return f"**Recommendation:** **{better}** saves {money(diff)}."
+        return f"**Analysis:** **{better}** saves {money(diff)}."
 
 
 def ai_audit_ledger(transactions: pd.DataFrame, query: str) -> str:
-    """CA AI Audit Assistant to detect anomalies and cash ratios."""
     if transactions.empty:
-        return "No transactions loaded to analyze."
+        return "No ledger data available to audit."
 
     client = get_gemini_client()
     if client is None:
-        return "Configure GEMINI_API_KEY in Streamlit Secrets to enable CA Audit Assistant."
+        return "Configure GEMINI_API_KEY in Secrets to activate CA AI Audit Assistant."
 
     try:
         by_cat = transactions.groupby(["type", "category"])["absolute_amount"].sum().round(0).astype(int).to_dict()
@@ -492,67 +440,37 @@ def ai_audit_ledger(transactions: pd.DataFrame, query: str) -> str:
         }
 
         prompt = f"""
-        You are an expert CA tax auditor. Review this summarized client ledger data:
+        You are an expert Indian CA auditor. Analyze this summarized client ledger:
         {json.dumps(summary_data, indent=2)}
 
         CA's Audit Query: {query}
 
-        Provide concise, high-value tax audit observations (3-5 sentences). Highlight any unusual spikes, cash transactions, or potential disallowance risks u/s 40A(3) or GST mismatches.
+        Provide 3-4 professional findings highlighting potential risks u/s 40A(3), cash ratios, GST mismatches, or unusual expense spikes.
         """
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
         )
-        return response.text or "No audit findings returned."
+        add_audit_log("CA AI Audit", "Audit inspection completed on current transaction state.", "SUCCESS")
+        return response.text or "Audit analysis completed."
     except Exception as exc:
+        add_audit_log("CA AI Audit", f"Audit query failed: {exc}", "ERROR")
         return f"Audit Error: {type(exc).__name__}"
 
 
-def ai_generate_client_memo(
-    profile: Dict[str, object],
-    new_est: TaxEstimate,
-    old_est: TaxEstimate,
-) -> str:
-    """Generate a formal CA Client Advisory Memo."""
-    client = get_gemini_client()
-    if client is None:
-        return "Gemini API Key required to generate formal memo."
-
-    try:
-        prompt = f"""
-        Draft a brief, professional tax advisory memo from a Chartered Accountant to their client:
-        Client Name: {profile.get('taxpayer_name', 'Valued Client')}
-        Business/Entity: {profile.get('business_type', 'Individual')}
-        Assessment Year: AY 2026-27 (FY 2025-26)
-
-        Figures:
-        - Gross Income: {money(new_est.gross_income)}
-        - New Regime Tax: {money(new_est.net_tax)}
-        - Old Regime Tax: {money(old_est.net_tax)}
-        - Recommended Regime: {"New Regime" if new_est.net_tax <= old_est.net_tax else "Old Regime"}
-
-        Include:
-        - Formal greeting & subject line
-        - Executive summary of tax liability
-        - Clear recommendation & action items before filing deadline
-        """
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
-        return response.text or "Memo draft unavailable."
-    except Exception as exc:
-        return f"Memo Error: {type(exc).__name__}"
-
-
 # =============================================================================
-# UI Setup & Sidebar
+# Custom UI & Styling Setup
 # =============================================================================
 
 def configure_page() -> None:
-    st.set_page_config(page_title=APP_TITLE, page_icon="🧾", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(
+        page_title=APP_TITLE,
+        page_icon="🧾",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    
     st.markdown(
         """
         <style>
@@ -560,29 +478,76 @@ def configure_page() -> None:
         footer {visibility: hidden;}
         header [data-testid="stToolbar"] {visibility: hidden; height: 0; position: fixed;}
 
+        /* Smooth page animations */
+        @keyframes fadeIn {
+            0% { opacity: 0; transform: translateY(8px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+
         .stApp {
-            background: linear-gradient(115deg, rgba(3, 7, 18, .96), rgba(8, 19, 36, .96)),
-                        linear-gradient(135deg, #050816 0%, #071629 38%, #0b1020 62%, #10251f 100%);
-            color: #eef7ff;
+            background: linear-gradient(125deg, #030712 0%, #0b1528 40%, #051a14 100%);
+            color: #f1f5f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            animation: fadeIn 0.4s ease-out;
         }
 
-        .hero {
-            padding: 1.45rem;
-            background: linear-gradient(145deg, rgba(15, 23, 42, .82), rgba(8, 19, 36, .70));
-            border: 1px solid rgba(148, 163, 184, .22);
-            border-radius: 10px;
-            margin-bottom: 1rem;
-        }
-
-        .info-box, .success-box, .warn-box {
-            padding: 0.85rem 1rem;
-            border-radius: 8px;
-            margin: 0.5rem 0;
+        /* Glassmorphism Cards */
+        .glass-card {
+            background: rgba(15, 23, 42, 0.75);
             border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            padding: 1.25rem 1.5rem;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+            margin-bottom: 1rem;
+            transition: transform 0.2s ease, border-color 0.2s ease;
         }
-        .info-box { background: rgba(59, 130, 246, 0.18); color: #dbeafe; }
-        .success-box { background: rgba(34, 197, 94, 0.18); color: #dcfce7; }
-        .warn-box { background: rgba(245, 158, 11, 0.18); color: #fef3c7; }
+
+        .glass-card:hover {
+            border-color: rgba(45, 212, 191, 0.4);
+            transform: translateY(-2px);
+        }
+
+        /* Custom Status Banners */
+        .status-box {
+            padding: 0.9rem 1.1rem;
+            border-radius: 8px;
+            margin: 0.6rem 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.95rem;
+        }
+        .status-box.info { background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3); color: #dbeafe; }
+        .status-box.success { background: rgba(34, 197, 94, 0.15); border-color: rgba(34, 197, 94, 0.3); color: #dcfce7; }
+        .status-box.warn { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.3); color: #fef3c7; }
+
+        /* Metric Styling */
+        div[data-testid="stMetric"] {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 0.8rem 1rem;
+        }
+
+        /* Tab styling */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.5rem;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 0.4rem;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+            color: #94a3b8;
+        }
+
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, rgba(45, 212, 191, 0.2), rgba(59, 130, 246, 0.2));
+            color: #f8fafc !important;
+            border: 1px solid rgba(45, 212, 191, 0.4);
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -591,47 +556,44 @@ def configure_page() -> None:
 
 def render_sidebar() -> Dict[str, object]:
     with st.sidebar:
-        st.title("🧾 Tax Profile & Setup")
-        st.caption(f"Legal Rules for {FINANCIAL_YEAR} → {ASSESSMENT_YEAR}")
+        st.title("🧾 Tax Profile")
+        st.caption(f"Filing Engine for {FINANCIAL_YEAR} ({ASSESSMENT_YEAR})")
 
-        taxpayer_name = st.text_input("Taxpayer / Business Name", value="Rajesh Kumar", key="sb_name")
+        taxpayer_name = st.text_input("Taxpayer / Business Name", value="Anand Sharma", key="sb_name")
         is_salaried = st.checkbox("Is Salaried Individual?", value=True)
 
         st.divider()
         st.subheader("1. AI Document Parser")
-        st.caption("Upload Form 16, Salary Slip, or AIS (PDF):")
-        doc_file = st.file_uploader("Form 16 / Document PDF", type=["pdf"], key="sb_doc")
+        doc_file = st.file_uploader("Upload Form 16 / Salary Slip (PDF)", type=["pdf"], key="sb_doc")
 
-        if doc_file is not None and st.button("Parse Document with Gemini AI", key="btn_parse_doc"):
+        if doc_file is not None and st.button("Parse Document with AI", key="btn_parse_doc", use_container_width=True):
             text = extract_pdf_full_text(doc_file)
-            with st.spinner("Extracting tax figures..."):
-                parsed, msg = ai_parse_form16_or_document(text)
+            with st.spinner("Extracting parameters with Gemini AI..."):
+                parsed, msg = ai_parse_document(text)
             if parsed:
                 st.session_state["in_gross_salary"] = parsed["gross_salary"]
                 st.session_state["in_80c"] = parsed["sec_80c"]
                 st.session_state["in_80d"] = parsed["sec_80d"]
                 st.session_state["in_hra"] = parsed["hra_exemption"]
                 st.session_state["in_prepaid_tax"] = parsed["tds_deducted"]
-                st.success(f"{msg} Employer: {parsed['employer_name']}")
+                st.success(f"{msg} ({parsed['employer_name']})")
             else:
                 st.warning(msg)
 
         st.divider()
-        st.subheader("2. Income & Deductions")
-        gross_salary = st.number_input(
-            "Gross Annual Income / Salary (₹)", min_value=0.0, value=1250000.0, step=25000.0, key="in_gross_salary"
-        )
+        st.subheader("2. Income & Exemptions")
+        gross_salary = st.number_input("Gross Annual Income (₹)", min_value=0.0, value=1350000.0, step=25000.0, key="in_gross_salary")
         sec_80c = st.number_input("Section 80C Deductions (Max ₹1.5L)", min_value=0.0, value=150000.0, step=10000.0, key="in_80c")
         sec_80d = st.number_input("Section 80D Health Insurance (₹)", min_value=0.0, value=25000.0, step=5000.0, key="in_80d")
         sec_80ccd = st.number_input("Section 80CCD(1B) NPS (Max ₹50K)", min_value=0.0, value=50000.0, step=5000.0, key="in_80ccd")
         hra_exemption = st.number_input("HRA Exemption u/s 10(13A) (₹)", min_value=0.0, value=0.0, step=10000.0, key="in_hra")
-        other_deductions = st.number_input("Other Deductions (80E, 80G, etc.)", min_value=0.0, value=0.0, step=5000.0, key="in_other_ded")
+        other_deductions = st.number_input("Other Deductions (₹)", min_value=0.0, value=0.0, step=5000.0, key="in_other_ded")
 
-        prepaid_tax = st.number_input("TDS + Advance Tax Paid (₹)", min_value=0.0, value=45000.0, step=5000.0, key="in_prepaid_tax")
+        prepaid_tax = st.number_input("TDS + Advance Tax Paid (₹)", min_value=0.0, value=55000.0, step=5000.0, key="in_prepaid_tax")
 
         st.divider()
-        st.subheader("3. Business / Presumptive")
-        presumptive_mode = st.selectbox("Presumptive Section", ["Business 44AD", "Profession 44ADA"])
+        st.subheader("3. Presumptive Income")
+        presumptive_mode = st.selectbox("Section Mode", ["Business 44AD", "Profession 44ADA"])
         digital_receipts = st.number_input("Digital Receipts (₹)", min_value=0.0, value=0.0, step=50000.0)
         cash_receipts = st.number_input("Cash Receipts (₹)", min_value=0.0, value=0.0, step=10000.0)
         professional_receipts = st.number_input("Professional Receipts (₹)", min_value=0.0, value=0.0, step=50000.0)
@@ -661,7 +623,7 @@ def build_regime_comparison_chart(new_est: TaxEstimate, old_est: TaxEstimate) ->
     fig = go.Figure(
         data=[
             go.Bar(
-                name="New Regime (u/s 115BAC)",
+                name="New Tax Regime (u/s 115BAC)",
                 x=["Gross Income", "Deductions", "Taxable Income", "Net Tax Liability"],
                 y=[new_est.gross_income, new_est.deductions_applied, new_est.taxable_income, new_est.net_tax],
                 marker_color="#2dd4bf",
@@ -680,7 +642,7 @@ def build_regime_comparison_chart(new_est: TaxEstimate, old_est: TaxEstimate) ->
         margin=dict(l=10, r=10, t=25, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(15,23,42,0.4)",
-        font=dict(color="#eaf7ff"),
+        font=dict(color="#f8fafc"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     return fig
@@ -696,40 +658,39 @@ def main() -> None:
 
     st.markdown(
         f"""
-        <div class="hero">
-            <h1 style="margin:0; font-size:2.2rem;">{APP_TITLE}</h1>
-            <p style="margin-top:0.4rem; color:#b9c7d8;">{APP_SUBTITLE}</p>
+        <div class="glass-card">
+            <h1 style="margin:0; font-size:2.2rem; color:#f8fafc;">{APP_TITLE}</h1>
+            <p style="margin-top:0.4rem; color:#94a3b8; font-size:1.05rem;">{APP_SUBTITLE}</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     tabs = st.tabs([
-        "1. Document & Ledger Upload",
-        "2. New vs Old Regime Analysis",
-        "3. CA AI Workbench & Audit",
-        "4. Client Checklist & Memo",
+        "1. Records Ingestion",
+        "2. Regime Optimization",
+        "3. CA AI Workbench",
+        "4. Provenance Audit Log",
+        "5. Handoff & Checklist",
     ])
 
     # -------------------------------------------------------------------------
-    # TAB 1: Document & Ledger Upload
+    # TAB 1: Records Ingestion
     # -------------------------------------------------------------------------
     with tabs[0]:
-        st.subheader("1. Attach Financial Statements & Data")
-        st.caption("Upload CSV / Excel bank statements, sales registers, or PDF reports:")
+        st.subheader("1. Ingest Bank Statements & Financial Data")
+        st.caption("Upload CSV or Excel bank statements or use auto-generated sample ledger data below.")
 
         uploads = st.file_uploader(
-            "Drop bank statements, ledger spreadsheets, or PDF tax records",
+            "Drop bank statements, spreadsheets, or financial CSVs",
             type=["csv", "xlsx", "xls", "pdf"],
             accept_multiple_files=True,
+            key="tab1_uploads",
         )
 
         table_frames = []
-        pdf_previews = []
         for uploaded in uploads or []:
-            if uploaded.name.lower().endswith(".pdf"):
-                pdf_previews.append(f"**{uploaded.name}**\n\n{extract_pdf_preview(uploaded)}")
-            else:
+            if not uploaded.name.lower().endswith(".pdf"):
                 table_frames.append(read_uploaded_table(uploaded))
 
         transactions = standardize_transactions(table_frames)
@@ -739,30 +700,29 @@ def main() -> None:
         book_profit = max(income - expenses, 0.0)
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("Detected Business Income", money(income))
-        m2.metric("Detected Expenses", money(expenses))
-        m3.metric("Computed Net Book Profit", money(book_profit))
+        m1.metric("Identified Receipts", money(income))
+        m2.metric("Identified Expenses", money(expenses))
+        m3.metric("Computed Book Profit", money(book_profit))
 
-        with st.expander("View Processed Ledger Transactions Table"):
+        with st.expander("View Cleaned Transactions Table"):
             st.dataframe(transactions, use_container_width=True, hide_index=True)
 
     # -------------------------------------------------------------------------
-    # TAB 2: Legal Tax Calculation & Regime Comparison
+    # TAB 2: Legal Regime Optimization
     # -------------------------------------------------------------------------
     with tabs[1]:
-        st.subheader("2. Tax Calculation Engine (FY 2025-26 / AY 2026-27)")
+        st.subheader("2. Legal Income Tax Comparison (FY 2025-26 / AY 2026-27)")
 
-        presumptive_inc, p_notes = estimate_presumptive_income(
-            float(profile["digital_receipts"]),
-            float(profile["cash_receipts"]),
-            float(profile["professional_receipts"]),
-            str(profile["presumptive_mode"]),
+        presumptive_inc = (
+            (float(profile["digital_receipts"]) * 0.06 + float(profile["cash_receipts"]) * 0.08)
+            if profile["presumptive_mode"] == "Business 44AD"
+            else float(profile["professional_receipts"]) * 0.50
         )
 
         total_gross = float(profile["gross_salary"]) + presumptive_inc
         prepaid = float(profile["prepaid_tax"])
 
-        # Execute Legal Tax Calculations
+        # Execute Calculations
         new_regime_est = calculate_new_regime_tax(
             gross_income=total_gross,
             is_salaried=bool(profile["is_salaried"]),
@@ -780,79 +740,84 @@ def main() -> None:
             prepaid_tax=prepaid,
         )
 
-        for note in p_notes:
-            st.markdown(f'<div class="warn-box">{note}</div>', unsafe_allow_html=True)
+        add_audit_log("Tax Engine", f"Calculated New Regime Tax ({money(new_regime_est.net_tax)}) and Old Regime Tax ({money(old_regime_est.net_tax)})", "INFO")
 
-        # High-level Metrics
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Gross Income", money(total_gross))
-        col2.metric("New Regime Net Tax", money(new_regime_est.net_tax), delta=f"Effective: {new_regime_est.effective_rate:.1%}")
-        col3.metric("Old Regime Net Tax", money(old_regime_est.net_tax), delta=f"Effective: {old_regime_est.effective_rate:.1%}")
-        
+        # Metrics Overview
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Gross Income", money(total_gross))
+        c2.metric("New Regime Tax", money(new_regime_est.net_tax), delta=f"Effective: {new_regime_est.effective_rate:.1%}")
+        c3.metric("Old Regime Tax", money(old_regime_est.net_tax), delta=f"Effective: {old_regime_est.effective_rate:.1%}")
+
         tax_diff = abs(new_regime_est.net_tax - old_regime_est.net_tax)
         best_regime = "New Regime" if new_regime_est.net_tax <= old_regime_est.net_tax else "Old Regime"
-        col4.metric("Recommended Option", best_regime, delta=f"Savings: {money(tax_diff)}")
+        c4.metric("Optimal Choice", best_regime, delta=f"Saves: {money(tax_diff)}")
 
         st.plotly_chart(build_regime_comparison_chart(new_regime_est, old_regime_est), use_container_width=True)
 
-        # AI Regime Advisory Note
-        st.markdown('<div class="info-box">', unsafe_allow_html=True)
-        st.markdown("#### Gemini AI Tax Advisor Recommendation")
+        st.markdown('<div class="status-box info">', unsafe_allow_html=True)
+        st.markdown("#### Gemini AI Strategy Insights")
         st.markdown(ai_recommend_regime(new_regime_est, old_regime_est, total_gross))
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Detailed Breakdown Table
-        st.subheader("Detailed Line-by-Line Comparison")
+        st.subheader("Line-by-Line Breakdown")
         comp_df = pd.DataFrame(
             [
                 ("Gross Annual Income", money(new_regime_est.gross_income), money(old_regime_est.gross_income)),
                 ("Standard Deduction", money(new_regime_est.deductions_applied), money(50000.0 if profile["is_salaried"] else 0.0)),
-                ("Chapter VI-A (80C, 80D, 80CCD, HRA)", "Not Allowed", money(old_regime_est.deductions_applied - (50000.0 if profile["is_salaried"] else 0.0))),
+                ("Chapter VI-A Deductions", "N/A", money(old_regime_est.deductions_applied - (50000.0 if profile["is_salaried"] else 0.0))),
                 ("Net Taxable Income", money(new_regime_est.taxable_income), money(old_regime_est.taxable_income)),
                 ("Gross Slab Tax", money(new_regime_est.gross_tax), money(old_regime_est.gross_tax)),
                 ("Section 87A Rebate", money(-new_regime_est.rebate_87a), money(-old_regime_est.rebate_87a)),
-                ("Health & Education Cess (4%)", money(new_regime_est.cess), money(old_regime_est.cess)),
+                ("Cess (4%)", money(new_regime_est.cess), money(old_regime_est.cess)),
                 ("Total Net Tax Liability", money(new_regime_est.net_tax), money(old_regime_est.net_tax)),
-                ("TDS / Advance Tax Paid", money(-prepaid), money(-prepaid)),
-                ("Final Balance Payable / (Refund)", money(new_regime_est.balance_payable), money(old_regime_est.balance_payable)),
+                ("Prepaid Tax / TDS", money(-prepaid), money(-prepaid)),
+                ("Balance Payable", money(new_regime_est.balance_payable), money(old_regime_est.balance_payable)),
             ],
-            columns=["Tax Calculation Head", "New Tax Regime (u/s 115BAC)", "Old Tax Regime"],
+            columns=["Line Item", "New Tax Regime (u/s 115BAC)", "Old Tax Regime"],
         )
         st.dataframe(comp_df, use_container_width=True, hide_index=True)
 
     # -------------------------------------------------------------------------
-    # TAB 3: CA AI Workbench & Audit Tools
+    # TAB 3: CA AI Workbench
     # -------------------------------------------------------------------------
     with tabs[2]:
-        st.subheader("3. CA AI Workbench & Audit Assistant")
-        st.caption("Free AI tools to automate ledger auditing, compliance checks, and query explanations.")
+        st.subheader("3. CA AI Inspection Workbench")
+        st.caption("Ask queries regarding Section 40A(3) disallowance risks, GST reconciliation, or unusual transaction spikes.")
 
         audit_query = st.text_input(
-            "Ask CA Audit Assistant about this ledger data",
-            placeholder="e.g., Any high cash withdrawals or disallowance risks u/s 40A(3)?",
-            key="audit_query_input",
+            "Enter Audit Query",
+            placeholder="e.g., Are there any disallowance risks u/s 40A(3) or high cash expenses?",
+            key="wb_audit_input",
         )
 
-        if st.button("Run AI Audit Inspection", key="btn_audit"):
-            with st.spinner("Analyzing ledger patterns with Gemini 2.5 Flash..."):
-                result = ai_audit_ledger(transactions, audit_query)
-            st.markdown(f'<div class="info-box">{escape(result)}</div>', unsafe_allow_html=True)
+        if st.button("Execute Audit Inspection", key="btn_wb_audit", use_container_width=False):
+            with st.spinner("Analyzing ledger parameters with Gemini 2.5 Flash..."):
+                audit_res = ai_audit_ledger(transactions, audit_query)
+            st.markdown(f'<div class="status-box info">{escape(audit_res)}</div>', unsafe_allow_html=True)
 
     # -------------------------------------------------------------------------
-    # TAB 4: Checklist & Client Advisory Memo
+    # TAB 4: Provenance Audit Log (Execution Pipeline)
     # -------------------------------------------------------------------------
     with tabs[3]:
-        st.subheader("4. Filing Checklist & Client Handoff")
+        st.subheader("4. Provenance Audit Log & Execution Pipeline")
+        st.caption("Step-by-step transparency log showing how data was processed and computed.")
 
-        checked_items = [item for item in REQUIRED_CHECKLIST if st.checkbox(item, key=f"chk_{item}")]
-        st.progress(len(checked_items) / len(REQUIRED_CHECKLIST))
+        if "audit_trail" in st.session_state and st.session_state["audit_trail"]:
+            audit_df = pd.DataFrame(st.session_state["audit_trail"])
+            st.dataframe(audit_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No execution events logged yet. Perform actions to view live audit entries.")
+
+    # -------------------------------------------------------------------------
+    # TAB 5: Handoff & Checklist
+    # -------------------------------------------------------------------------
+    with tabs[4]:
+        st.subheader("5. Checklist & Handoff Package")
+
+        checked = [item for item in REQUIRED_CHECKLIST if st.checkbox(item, key=f"t5_chk_{item}")]
+        st.progress(len(checked) / len(REQUIRED_CHECKLIST))
 
         st.divider()
-        st.subheader("Generate CA Client Advisory Memo")
-        if st.button("Draft Client Advisory Memo", key="btn_memo"):
-            with st.spinner("Drafting memo with Gemini AI..."):
-                memo = ai_generate_client_memo(profile, new_regime_est, old_regime_est)
-            st.text_area("Generated Memo Draft", value=memo, height=280)
 
         packet_data = {
             "generated_on": date.today().isoformat(),
@@ -861,11 +826,11 @@ def main() -> None:
             "profile": profile,
             "new_regime_tax": new_regime_est.net_tax,
             "old_regime_tax": old_regime_est.net_tax,
-            "checklist": checked_items,
+            "checked_items": checked,
         }
 
         st.download_button(
-            "Download Handoff JSON for Records",
+            "Download Final Handoff JSON",
             data=json.dumps(packet_data, indent=2),
             file_name=f"tax_summary_{profile['taxpayer_name']}.json",
             mime="application/json",
