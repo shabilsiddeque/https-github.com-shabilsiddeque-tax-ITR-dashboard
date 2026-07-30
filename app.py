@@ -35,6 +35,7 @@ APP_TITLE = "Beginner Tax Desk"
 APP_SUBTITLE = "Easy ITR preparation for entry-level businesses"
 ASSESSMENT_YEAR = "AY 2026-27"
 FINANCIAL_YEAR = "FY 2025-26"
+FY_START_YEAR = re.search(r"\d{4}", FINANCIAL_YEAR).group()  # "2025", used for default transaction dates
 
 OFFICIAL_SOURCES = {
     "ITR-4 FAQ": "https://www.incometax.gov.in/iec/foportal/help/e-filing-itr4-form-sugam-faq",
@@ -175,7 +176,7 @@ def standardize_transactions(raw_frames: Iterable[pd.DataFrame]) -> pd.DataFrame
             debit_col = next((c for c in df.columns if c in {"debit", "withdrawal", "withdrawals"}), None)
             credit_col = next((c for c in df.columns if c in {"credit", "deposit", "deposits"}), None)
 
-            clean = pd.DataFrame()
+            clean = pd.DataFrame(index=df.index)
             clean["date"] = pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT
             clean["description"] = df[desc_col].astype(str) if desc_col else "Uploaded transaction"
 
@@ -187,6 +188,12 @@ def standardize_transactions(raw_frames: Iterable[pd.DataFrame]) -> pd.DataFrame
                 clean["amount"] = credit - debit
             else:
                 clean["amount"] = 0.0
+
+            if not (date_col or desc_col or amount_col or debit_col or credit_col):
+                st.warning(
+                    "Could not recognize any date/description/amount columns in one of the uploaded "
+                    "files. Expected headers like Date, Description, and Amount (or Debit/Credit)."
+                )
 
             clean["type"] = np.where(clean["amount"] >= 0, "Income", "Expense")
             clean["category"] = [
@@ -200,7 +207,7 @@ def standardize_transactions(raw_frames: Iterable[pd.DataFrame]) -> pd.DataFrame
             return make_sample_transactions()
 
         transactions = pd.concat(frames, ignore_index=True)
-        transactions["date"] = transactions["date"].fillna(pd.Timestamp(f"{FINANCIAL_YEAR[:4]}-04-01"))
+        transactions["date"] = transactions["date"].fillna(pd.Timestamp(f"{FY_START_YEAR}-04-01"))
         return transactions.sort_values("date").reset_index(drop=True)
     except Exception as exc:
         st.error("Uploaded transactions could not be cleaned.")
@@ -1664,3 +1671,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
