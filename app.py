@@ -336,6 +336,17 @@ def configure_page() -> None:
     st.markdown(
         """
         <style>
+        /* Hide Streamlit Community Cloud's GitHub badge, hamburger menu, and footer */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header [data-testid="stToolbar"] {visibility: hidden; height: 0; position: fixed;}
+        .stAppDeployButton {display: none;}
+        a[href*="github.com"] {display: none !important;}
+        .viewerBadge_container__1QSob,
+        .viewerBadge_link__1S137,
+        .styles_viewerBadge__1yB5_,
+        .stAppToolbar {display: none !important;}
+
         .stApp {
             background:
                 radial-gradient(circle at 9% 8%, rgba(70, 167, 255, 0.18), transparent 28%),
