@@ -2,7 +2,7 @@
 Beginner Tax Desk & CA Assist Platform (FY 2025-26 / AY 2026-27)
 
 Features:
-- PDF Summary Export using FPDF2
+- Fixed FPDF Unicode Encoding Issue (ASCII Rupee Symbol in PDF)
 - Form 16, Bank Statement & Document Ingestion
 - Old vs New Tax Regime Calculation Engine (FY 2025-26 / AY 2026-27)
 - Free AI Analysis via Google Gemini 2.5 Flash
@@ -99,6 +99,26 @@ class TaxEstimate:
 
 
 # =============================================================================
+# Helper Formatting Utilities
+# =============================================================================
+
+def money(value: float) -> str:
+    """Format currency values into Indian Rupees for Web UI."""
+    try:
+        return f"₹{value:,.0f}"
+    except Exception:
+        return "₹0"
+
+
+def pdf_money(value: float) -> str:
+    """Format currency using ASCII 'Rs.' for FPDF to prevent Unicode Encoding Errors."""
+    try:
+        return f"Rs. {value:,.0f}"
+    except Exception:
+        return "Rs. 0"
+
+
+# =============================================================================
 # PDF Report Generator Engine
 # =============================================================================
 
@@ -128,7 +148,7 @@ def generate_pdf_summary(
     old_est: TaxEstimate,
     checked_items: List[str],
 ) -> bytes:
-    """Creates a downloadable Tax Summary PDF Report in memory."""
+    """Creates a downloadable Tax Summary PDF Report using safe ASCII formatting."""
     pdf = TaxReportPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -162,20 +182,20 @@ def generate_pdf_summary(
     pdf.cell(60, 7, " Old Tax Regime", border=1, fill=True, align="R")
     pdf.ln()
 
-    # Table Rows
+    # Table Rows with ASCII pdf_money formatting
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(51, 65, 85)
 
     rows = [
-        ("Gross Annual Income", money(new_est.gross_income), money(old_est.gross_income)),
-        ("Total Deductions & Exemptions", money(new_est.deductions_applied), money(old_est.deductions_applied)),
-        ("Net Taxable Income", money(new_est.taxable_income), money(old_est.taxable_income)),
-        ("Gross Slab Tax", money(new_est.gross_tax), money(old_est.gross_tax)),
-        ("Section 87A Rebate", money(-new_est.rebate_87a), money(-old_est.rebate_87a)),
-        ("Health & Education Cess (4%)", money(new_est.cess), money(old_est.cess)),
-        ("Total Net Tax Liability", money(new_est.net_tax), money(old_est.net_tax)),
-        ("Prepaid Taxes / TDS Paid", money(-profile.get("prepaid_tax", 0)), money(-profile.get("prepaid_tax", 0))),
-        ("Final Balance Payable / (Refund)", money(new_est.balance_payable), money(old_est.balance_payable)),
+        ("Gross Annual Income", pdf_money(new_est.gross_income), pdf_money(old_est.gross_income)),
+        ("Total Deductions & Exemptions", pdf_money(new_est.deductions_applied), pdf_money(old_est.deductions_applied)),
+        ("Net Taxable Income", pdf_money(new_est.taxable_income), pdf_money(old_est.taxable_income)),
+        ("Gross Slab Tax", pdf_money(new_est.gross_tax), pdf_money(old_est.gross_tax)),
+        ("Section 87A Rebate", pdf_money(-new_est.rebate_87a), pdf_money(-old_est.rebate_87a)),
+        ("Health & Education Cess (4%)", pdf_money(new_est.cess), pdf_money(old_est.cess)),
+        ("Total Net Tax Liability", pdf_money(new_est.net_tax), pdf_money(old_est.net_tax)),
+        ("Prepaid Taxes / TDS Paid", pdf_money(-profile.get("prepaid_tax", 0)), pdf_money(-profile.get("prepaid_tax", 0))),
+        ("Final Balance Payable / (Refund)", pdf_money(new_est.balance_payable), pdf_money(old_est.balance_payable)),
     ]
 
     for head, new_val, old_val in rows:
@@ -208,11 +228,10 @@ def generate_pdf_summary(
 
 
 # =============================================================================
-# Helper Utilities & Execution Logger
+# Execution Logger & Data Utilities
 # =============================================================================
 
 def add_audit_log(stage: str, details: str, status: str = "INFO") -> None:
-    """Record execution milestones for transparent data provenance."""
     if "audit_trail" not in st.session_state:
         st.session_state["audit_trail"] = []
     timestamp = time.strftime("%H:%M:%S")
@@ -222,14 +241,6 @@ def add_audit_log(stage: str, details: str, status: str = "INFO") -> None:
         "details": details,
         "status": status,
     })
-
-
-def money(value: float) -> str:
-    """Format currency values into Indian Rupees."""
-    try:
-        return f"₹{value:,.0f}"
-    except Exception:
-        return "₹0"
 
 
 def normalize_column_name(column: object) -> str:
@@ -345,7 +356,6 @@ def make_sample_transactions() -> pd.DataFrame:
 # =============================================================================
 
 def calculate_new_regime_tax(gross_income: float, is_salaried: bool, prepaid_tax: float) -> TaxEstimate:
-    """Calculates tax under NEW TAX REGIME (u/s 115BAC) for FY 2025-26."""
     std_deduction = 75_000.0 if is_salaried else 0.0
     taxable_income = max(gross_income - std_deduction, 0.0)
 
@@ -393,7 +403,6 @@ def calculate_old_regime_tax(
     other_deductions: float,
     prepaid_tax: float,
 ) -> TaxEstimate:
-    """Calculates tax under OLD TAX REGIME for FY 2025-26."""
     std_deduction = 50_000.0 if is_salaried else 0.0
     total_80c = min(max(sec_80c, 0.0), 150_000.0)
     total_80ccd = min(max(sec_80ccd_1b, 0.0), 50_000.0)
@@ -908,20 +917,19 @@ def main() -> None:
 
         st.divider()
 
-        # Dynamic PDF Bytes Generation
-        pdf_bytes = generate_pdf_summary(
-            profile=profile,
-            new_est=new_regime_est,
-            old_est=old_regime_est,
-            checked_items=checked,
-        )
-
         col_dl1, col_dl2 = st.columns(2)
 
         with col_dl1:
+            # Generate PDF dynamically on button click to prevent premature encoding errors
+            pdf_data = generate_pdf_summary(
+                profile=profile,
+                new_est=new_regime_est,
+                old_est=old_regime_est,
+                checked_items=checked,
+            )
             st.download_button(
                 label="📄 Download Tax Summary Report (PDF)",
-                data=pdf_bytes,
+                data=pdf_data,
                 file_name=f"Tax_Summary_{profile['taxpayer_name'].replace(' ', '_')}_{ASSESSMENT_YEAR}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
@@ -948,3 +956,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
