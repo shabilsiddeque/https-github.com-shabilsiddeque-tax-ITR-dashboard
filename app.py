@@ -145,7 +145,6 @@ def generate_pdf_summary(
     pdf.cell(95, 6, f"Date Generated: {date.today().strftime('%d %B %Y')}", ln=False)
     
     best_regime = "New Tax Regime (u/s 115BAC)" if new_est.net_tax <= old_est.net_tax else "Old Tax Regime"
-    tax_saved = abs(new_est.net_tax - old_est.net_tax)
     pdf.cell(95, 6, f"Recommended Option: {best_regime}", ln=True)
     pdf.ln(4)
 
@@ -172,7 +171,7 @@ def generate_pdf_summary(
         ("Total Deductions & Exemptions", money(new_est.deductions_applied), money(old_est.deductions_applied)),
         ("Net Taxable Income", money(new_est.taxable_income), money(old_est.taxable_income)),
         ("Gross Slab Tax", money(new_est.gross_tax), money(old_est.gross_tax)),
-        ("Section 87A Rebate", money(-new_regime_est.rebate_87a), money(-old_regime_est.rebate_87a)),
+        ("Section 87A Rebate", money(-new_est.rebate_87a), money(-old_est.rebate_87a)),
         ("Health & Education Cess (4%)", money(new_est.cess), money(old_est.cess)),
         ("Total Net Tax Liability", money(new_est.net_tax), money(old_est.net_tax)),
         ("Prepaid Taxes / TDS Paid", money(-profile.get("prepaid_tax", 0)), money(-profile.get("prepaid_tax", 0))),
@@ -203,9 +202,8 @@ def generate_pdf_summary(
     pdf.ln(6)
     pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(100, 116, 139)
-    pdf.multi_cell(0, 4, "Disclaimer: This document is an automated tax estimation and reconciliation summary. Please cross-verify figures with Form 26AS, AIS, and TIS before official e-filing on the Income Tax Portal.")
+    pdf.multi_cell(0, 4, "Disclaimer: This document is an automated tax estimation summary. Please cross-verify figures with Form 26AS, AIS, and TIS before official e-filing on the Income Tax Portal.")
 
-    # FPDF2 output as bytearray/bytes
     return bytes(pdf.output())
 
 
