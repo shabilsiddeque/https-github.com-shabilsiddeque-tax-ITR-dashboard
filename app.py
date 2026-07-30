@@ -1,12 +1,12 @@
 """
 Beginner Tax Desk & CA Assist Platform (FY 2025-26 / AY 2026-27)
 
-A UI/UX tax platform featuring:
-- Fluid motion & glassmorphism styling
-- Ingestion for Form 16, bank statements, & AIS
-- Legal Old vs New Regime calculation (FY 2025-26 / AY 2026-27)
-- AI Audit & Regime Optimization (via Google Gemini 2.5 Flash)
-- Provenance Audit Trail (Live Step-by-Step execution pipeline)
+Features:
+- PDF Summary Export using FPDF2
+- Form 16, Bank Statement & Document Ingestion
+- Old vs New Tax Regime Calculation Engine (FY 2025-26 / AY 2026-27)
+- Free AI Analysis via Google Gemini 2.5 Flash
+- Provenance Audit Trail & Live Execution Logs
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from fpdf import FPDF
 
 
 # =============================================================================
@@ -95,6 +96,117 @@ class TaxEstimate:
     balance_payable: float
     effective_rate: float
     regime_name: str
+
+
+# =============================================================================
+# PDF Report Generator Engine
+# =============================================================================
+
+class TaxReportPDF(FPDF):
+    def header(self):
+        self.set_font("Helvetica", "B", 15)
+        self.set_text_color(15, 23, 42)
+        self.cell(0, 10, "INCOME TAX COMPUTATION REPORT", ln=True, align="C")
+        self.set_font("Helvetica", "", 9)
+        self.set_text_color(100, 116, 139)
+        self.cell(0, 5, f"Financial Year: {FINANCIAL_YEAR}  |  Assessment Year: {ASSESSMENT_YEAR}", ln=True, align="C")
+        self.ln(5)
+        self.set_draw_color(226, 232, 240)
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(148, 163, 184)
+        self.cell(0, 10, f"Generated via Beginner Tax Desk & CA Assist  |  Page {self.page_no()}", align="C")
+
+
+def generate_pdf_summary(
+    profile: Dict[str, object],
+    new_est: TaxEstimate,
+    old_est: TaxEstimate,
+    checked_items: List[str],
+) -> bytes:
+    """Creates a downloadable Tax Summary PDF Report in memory."""
+    pdf = TaxReportPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # 1. Taxpayer Profile Section
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(30, 41, 59)
+    pdf.cell(0, 7, "1. Taxpayer Profile & Summary", ln=True)
+
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(51, 65, 85)
+    pdf.cell(95, 6, f"Taxpayer Name: {profile.get('taxpayer_name', 'N/A')}", ln=False)
+    pdf.cell(95, 6, f"Employment Status: {'Salaried' if profile.get('is_salaried') else 'Non-Salaried'}", ln=True)
+    pdf.cell(95, 6, f"Date Generated: {date.today().strftime('%d %B %Y')}", ln=False)
+    
+    best_regime = "New Tax Regime (u/s 115BAC)" if new_est.net_tax <= old_est.net_tax else "Old Tax Regime"
+    tax_saved = abs(new_est.net_tax - old_est.net_tax)
+    pdf.cell(95, 6, f"Recommended Option: {best_regime}", ln=True)
+    pdf.ln(4)
+
+    # 2. Side-by-Side Tax Comparison Table
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(30, 41, 59)
+    pdf.cell(0, 7, "2. Tax Calculation Breakdown (New vs Old Regime)", ln=True)
+
+    # Table Header
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(241, 245, 249)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(70, 7, " Calculation Head", border=1, fill=True)
+    pdf.cell(60, 7, " New Regime (u/s 115BAC)", border=1, fill=True, align="R")
+    pdf.cell(60, 7, " Old Tax Regime", border=1, fill=True, align="R")
+    pdf.ln()
+
+    # Table Rows
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(51, 65, 85)
+
+    rows = [
+        ("Gross Annual Income", money(new_est.gross_income), money(old_est.gross_income)),
+        ("Total Deductions & Exemptions", money(new_est.deductions_applied), money(old_est.deductions_applied)),
+        ("Net Taxable Income", money(new_est.taxable_income), money(old_est.taxable_income)),
+        ("Gross Slab Tax", money(new_est.gross_tax), money(old_est.gross_tax)),
+        ("Section 87A Rebate", money(-new_regime_est.rebate_87a), money(-old_regime_est.rebate_87a)),
+        ("Health & Education Cess (4%)", money(new_est.cess), money(old_est.cess)),
+        ("Total Net Tax Liability", money(new_est.net_tax), money(old_est.net_tax)),
+        ("Prepaid Taxes / TDS Paid", money(-profile.get("prepaid_tax", 0)), money(-profile.get("prepaid_tax", 0))),
+        ("Final Balance Payable / (Refund)", money(new_est.balance_payable), money(old_est.balance_payable)),
+    ]
+
+    for head, new_val, old_val in rows:
+        pdf.cell(70, 6, f" {head}", border=1)
+        pdf.cell(60, 6, f"{new_val} ", border=1, align="R")
+        pdf.cell(60, 6, f"{old_val} ", border=1, align="R")
+        pdf.ln()
+
+    pdf.ln(6)
+
+    # 3. Compliance Verification Checklist
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(30, 41, 59)
+    pdf.cell(0, 7, "3. Documentation & Verification Checklist Status", ln=True)
+
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(51, 65, 85)
+    
+    for item in REQUIRED_CHECKLIST:
+        status_text = "[ OK ] Verified" if item in checked_items else "[    ] Pending Verification"
+        pdf.cell(140, 5, f"- {item}", ln=False)
+        pdf.cell(50, 5, status_text, ln=True, align="R")
+
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.set_text_color(100, 116, 139)
+    pdf.multi_cell(0, 4, "Disclaimer: This document is an automated tax estimation and reconciliation summary. Please cross-verify figures with Form 26AS, AIS, and TIS before official e-filing on the Income Tax Portal.")
+
+    # FPDF2 output as bytearray/bytes
+    return bytes(pdf.output())
 
 
 # =============================================================================
@@ -245,7 +357,6 @@ def calculate_new_regime_tax(gross_income: float, is_salaried: bool, prepaid_tax
             slice_amt = min(taxable_income, upper) - lower
             gross_tax += slice_amt * rate
 
-    # Rebate u/s 87A (New Regime): Income up to ₹12 Lakh gets up to ₹60,000 rebate
     if taxable_income <= 1_200_000:
         rebate = min(gross_tax, 60_000.0)
     elif taxable_income > 1_200_000:
@@ -299,7 +410,6 @@ def calculate_old_regime_tax(
             slice_amt = min(taxable_income, upper) - lower
             gross_tax += slice_amt * rate
 
-    # Rebate u/s 87A (Old Regime): Income up to ₹5 Lakh gets up to ₹12,500 rebate
     if taxable_income <= 500_000:
         rebate = min(gross_tax, 12_500.0)
     else:
@@ -382,7 +492,7 @@ def ai_parse_document(doc_text: str) -> Tuple[Optional[Dict[str, float]], str]:
             "tds_deducted": float(parsed.get("tds_deducted", 0) or 0),
             "employer_name": str(parsed.get("employer_name", "") or "Detected Employer"),
         }
-        add_audit_log("AI Document Ingestion", f"Successfully extracted tax parameters for employer: {data['employer_name']}", "SUCCESS")
+        add_audit_log("AI Document Ingestion", f"Successfully extracted parameters for employer: {data['employer_name']}", "SUCCESS")
         return data, "Extracted successfully using Gemini AI."
     except Exception as exc:
         add_audit_log("AI Document Ingestion", f"Extraction failed: {exc}", "ERROR")
@@ -478,7 +588,6 @@ def configure_page() -> None:
         footer {visibility: hidden;}
         header [data-testid="stToolbar"] {visibility: hidden; height: 0; position: fixed;}
 
-        /* Smooth page animations */
         @keyframes fadeIn {
             0% { opacity: 0; transform: translateY(8px); }
             100% { opacity: 1; transform: translateY(0); }
@@ -491,7 +600,6 @@ def configure_page() -> None:
             animation: fadeIn 0.4s ease-out;
         }
 
-        /* Glassmorphism Cards */
         .glass-card {
             background: rgba(15, 23, 42, 0.75);
             border: 1px solid rgba(255, 255, 255, 0.12);
@@ -500,15 +608,8 @@ def configure_page() -> None:
             backdrop-filter: blur(16px);
             box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
             margin-bottom: 1rem;
-            transition: transform 0.2s ease, border-color 0.2s ease;
         }
 
-        .glass-card:hover {
-            border-color: rgba(45, 212, 191, 0.4);
-            transform: translateY(-2px);
-        }
-
-        /* Custom Status Banners */
         .status-box {
             padding: 0.9rem 1.1rem;
             border-radius: 8px;
@@ -517,10 +618,7 @@ def configure_page() -> None:
             font-size: 0.95rem;
         }
         .status-box.info { background: rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3); color: #dbeafe; }
-        .status-box.success { background: rgba(34, 197, 94, 0.15); border-color: rgba(34, 197, 94, 0.3); color: #dcfce7; }
-        .status-box.warn { background: rgba(245, 158, 11, 0.15); border-color: rgba(245, 158, 11, 0.3); color: #fef3c7; }
 
-        /* Metric Styling */
         div[data-testid="stMetric"] {
             background: rgba(15, 23, 42, 0.6);
             border: 1px solid rgba(255, 255, 255, 0.12);
@@ -528,19 +626,12 @@ def configure_page() -> None:
             padding: 0.8rem 1rem;
         }
 
-        /* Tab styling */
         .stTabs [data-baseweb="tab-list"] {
             gap: 0.5rem;
             background: rgba(15, 23, 42, 0.6);
             padding: 0.4rem;
             border-radius: 10px;
             border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .stTabs [data-baseweb="tab"] {
-            border-radius: 8px;
-            padding: 0.5rem 1rem;
-            color: #94a3b8;
         }
 
         .stTabs [aria-selected="true"] {
@@ -671,7 +762,7 @@ def main() -> None:
         "2. Regime Optimization",
         "3. CA AI Workbench",
         "4. Provenance Audit Log",
-        "5. Handoff & Checklist",
+        "5. Handoff & PDF Export",
     ])
 
     # -------------------------------------------------------------------------
@@ -809,33 +900,52 @@ def main() -> None:
             st.info("No execution events logged yet. Perform actions to view live audit entries.")
 
     # -------------------------------------------------------------------------
-    # TAB 5: Handoff & Checklist
+    # TAB 5: Handoff & PDF Export
     # -------------------------------------------------------------------------
     with tabs[4]:
-        st.subheader("5. Checklist & Handoff Package")
+        st.subheader("5. Document Checklist & Final PDF Report Export")
 
         checked = [item for item in REQUIRED_CHECKLIST if st.checkbox(item, key=f"t5_chk_{item}")]
         st.progress(len(checked) / len(REQUIRED_CHECKLIST))
 
         st.divider()
 
-        packet_data = {
-            "generated_on": date.today().isoformat(),
-            "assessment_year": ASSESSMENT_YEAR,
-            "financial_year": FINANCIAL_YEAR,
-            "profile": profile,
-            "new_regime_tax": new_regime_est.net_tax,
-            "old_regime_tax": old_regime_est.net_tax,
-            "checked_items": checked,
-        }
-
-        st.download_button(
-            "Download Final Handoff JSON",
-            data=json.dumps(packet_data, indent=2),
-            file_name=f"tax_summary_{profile['taxpayer_name']}.json",
-            mime="application/json",
-            use_container_width=True,
+        # Dynamic PDF Bytes Generation
+        pdf_bytes = generate_pdf_summary(
+            profile=profile,
+            new_est=new_regime_est,
+            old_est=old_regime_est,
+            checked_items=checked,
         )
+
+        col_dl1, col_dl2 = st.columns(2)
+
+        with col_dl1:
+            st.download_button(
+                label="📄 Download Tax Summary Report (PDF)",
+                data=pdf_bytes,
+                file_name=f"Tax_Summary_{profile['taxpayer_name'].replace(' ', '_')}_{ASSESSMENT_YEAR}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+        with col_dl2:
+            packet_data = {
+                "generated_on": date.today().isoformat(),
+                "assessment_year": ASSESSMENT_YEAR,
+                "financial_year": FINANCIAL_YEAR,
+                "profile": profile,
+                "new_regime_tax": new_regime_est.net_tax,
+                "old_regime_tax": old_regime_est.net_tax,
+                "checked_items": checked,
+            }
+            st.download_button(
+                label="💾 Download Handoff Data (JSON)",
+                data=json.dumps(packet_data, indent=2),
+                file_name=f"tax_summary_{profile['taxpayer_name']}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
 
 
 if __name__ == "__main__":
