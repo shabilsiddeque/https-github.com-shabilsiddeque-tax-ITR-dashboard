@@ -15,9 +15,10 @@ import io
 import json
 import os
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from html import escape
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +26,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 from fpdf import FPDF
 
@@ -38,6 +40,11 @@ APP_SUBTITLE = "Smart ITR preparation, AI auditing, and legal regime optimizatio
 ASSESSMENT_YEAR = "AY 2026-27"
 FINANCIAL_YEAR = "FY 2025-26"
 FY_START_YEAR = "2025"
+
+# CA Assist Subscription (Razorpay Payment Links)
+SUBSCRIPTION_PRICE_INR = 499  # change this one number to reprice the plan
+SUBSCRIPTION_DAYS = 30
+SUBSCRIBERS_DB_PATH = "ca_subscribers.db"
 
 # New Tax Regime Slabs (u/s 115BAC) - FY 2025-26
 NEW_REGIME_SLABS: List[Tuple[float, float, float]] = [
@@ -580,6 +587,200 @@ def ai_audit_ledger(transactions: pd.DataFrame, query: str) -> str:
 
 
 # =============================================================================
+# CA Assist Subscription Engine (Razorpay Payment Links)
+#
+# Zero manual work by design: a CA clicks "Subscribe", pays via a
+# Razorpay-hosted Payment Link (card/UPI/netbanking), and the app itself
+# polls Razorpay's API to confirm payment and unlock access - nobody has to
+# check a bank statement or hand out access codes by hand.
+#
+# One-time setup required (not recurring effort):
+#   1. Create a free Razorpay account at razorpay.com (test mode needs no KYC).
+#   2. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to Streamlit Secrets.
+# Until those secrets are set, the paywall shows a "not configured yet"
+# message instead of breaking the app.
+# =============================================================================
+
+def get_razorpay_keys() -> Tuple[Optional[str], Optional[str]]:
+    key_id = st.secrets.get("RAZORPAY_KEY_ID", None) or os.environ.get("RAZORPAY_KEY_ID")
+    key_secret = st.secrets.get("RAZORPAY_KEY_SECRET", None) or os.environ.get("RAZORPAY_KEY_SECRET")
+    if not key_id or not key_secret:
+        return None, None
+    return key_id, key_secret
+
+
+def init_subscribers_db() -> None:
+    conn = sqlite3.connect(SUBSCRIBERS_DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscribers (
+            email TEXT PRIMARY KEY,
+            expires_at TEXT,
+            payment_link_id TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_subscription_active(email: str) -> bool:
+    if not email:
+        return False
+    init_subscribers_db()
+    conn = sqlite3.connect(SUBSCRIBERS_DB_PATH)
+    row = conn.execute("SELECT expires_at FROM subscribers WHERE email = ?", (email.strip().lower(),)).fetchone()
+    conn.close()
+    if not row:
+        return False
+    try:
+        return datetime.now() < datetime.fromisoformat(row[0])
+    except Exception:
+        return False
+
+
+def get_subscription_expiry(email: str) -> Optional[datetime]:
+    init_subscribers_db()
+    conn = sqlite3.connect(SUBSCRIBERS_DB_PATH)
+    row = conn.execute("SELECT expires_at FROM subscribers WHERE email = ?", (email.strip().lower(),)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        return datetime.fromisoformat(row[0])
+    except Exception:
+        return None
+
+
+def activate_subscription(email: str, payment_link_id: str) -> None:
+    init_subscribers_db()
+    expires_at = (datetime.now() + timedelta(days=SUBSCRIPTION_DAYS)).isoformat()
+    conn = sqlite3.connect(SUBSCRIBERS_DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO subscribers (email, expires_at, payment_link_id) VALUES (?, ?, ?)
+        ON CONFLICT(email) DO UPDATE SET expires_at = excluded.expires_at, payment_link_id = excluded.payment_link_id
+        """,
+        (email.strip().lower(), expires_at, payment_link_id),
+    )
+    conn.commit()
+    conn.close()
+    add_audit_log("Subscription", f"Activated CA Assist subscription for {email} until {expires_at[:10]}.", "SUCCESS")
+
+
+def create_payment_link(email: str) -> Optional[dict]:
+    key_id, key_secret = get_razorpay_keys()
+    if not key_id:
+        return None
+
+    payload = {
+        "amount": SUBSCRIPTION_PRICE_INR * 100,  # Razorpay expects paise
+        "currency": "INR",
+        "accept_partial": False,
+        "description": "CA Assist - 1 Month Subscription",
+        "customer": {"email": email},
+        "notify": {"email": True},
+        "reminder_enable": True,
+        "notes": {"subscriber_email": email},
+    }
+    try:
+        resp = requests.post(
+            "https://api.razorpay.com/v1/payment_links",
+            auth=(key_id, key_secret),
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        add_audit_log("Payment", f"Created Razorpay payment link for {email}.", "INFO")
+        return resp.json()
+    except Exception as exc:
+        add_audit_log("Payment", f"Failed to create payment link: {exc}", "ERROR")
+        return None
+
+
+def check_payment_link_status(payment_link_id: str) -> Optional[str]:
+    key_id, key_secret = get_razorpay_keys()
+    if not key_id:
+        return None
+    try:
+        resp = requests.get(
+            f"https://api.razorpay.com/v1/payment_links/{payment_link_id}",
+            auth=(key_id, key_secret),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("status")  # "created" | "paid" | "cancelled" | "expired"
+    except Exception as exc:
+        add_audit_log("Payment", f"Failed to check payment status: {exc}", "ERROR")
+        return None
+
+
+def render_ca_subscription_gate() -> bool:
+    """Renders the paywall UI. Returns True once the CA has an active subscription."""
+    email = st.text_input(
+        "Your email (used to check and activate your CA Assist subscription)",
+        key="ca_sub_email",
+    ).strip().lower()
+
+    if not email:
+        st.info("Enter your email above to check your subscription status.")
+        return False
+
+    if is_subscription_active(email):
+        expiry = get_subscription_expiry(email)
+        expiry_str = expiry.strftime("%d %b %Y") if expiry else "soon"
+        st.success(f"CA Assist is active for {email} until {expiry_str}.")
+        return True
+
+    key_id, _ = get_razorpay_keys()
+    if not key_id:
+        st.error(
+            "Payments aren't configured yet on this deployment. "
+            "Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to Streamlit Secrets to enable subscriptions."
+        )
+        return False
+
+    st.warning(f"CA Assist tools need an active subscription - **{money(SUBSCRIPTION_PRICE_INR)}/month**.")
+
+    link_key = "ca_sub_payment_link"
+    if st.session_state.get(f"{link_key}_email") != email:
+        st.session_state.pop(link_key, None)
+        st.session_state.pop(f"{link_key}_email", None)
+
+    if link_key not in st.session_state:
+        with st.spinner("Setting up your payment link..."):
+            link_data = create_payment_link(email)
+        if link_data:
+            st.session_state[link_key] = link_data
+            st.session_state[f"{link_key}_email"] = email
+
+    link_data = st.session_state.get(link_key)
+    if not link_data:
+        st.error("Couldn't create a payment link right now. Please try again in a moment.")
+        return False
+
+    st.markdown(f"**[Click here to pay {money(SUBSCRIPTION_PRICE_INR)} securely via Razorpay]({link_data['short_url']})**")
+    st.caption("Card, UPI, and netbanking are all supported on the Razorpay page.")
+
+    if st.button("I've paid - check my status", key="btn_check_payment", use_container_width=True):
+        with st.spinner("Checking payment status..."):
+            status = check_payment_link_status(link_data["id"])
+        if status == "paid":
+            activate_subscription(email, link_data["id"])
+            st.session_state.pop(link_key, None)
+            st.session_state.pop(f"{link_key}_email", None)
+            st.success("Payment confirmed! CA Assist is now unlocked for 30 days.")
+            st.rerun()
+        elif status in {"cancelled", "expired"}:
+            st.error("That payment link is no longer valid. Refresh the page to get a new one.")
+            st.session_state.pop(link_key, None)
+        else:
+            st.info(f"Payment not confirmed yet (status: {status or 'unknown'}). Complete the payment, then click again.")
+
+    return False
+
+
+# =============================================================================
 # Custom UI & Styling Setup
 # =============================================================================
 
@@ -664,22 +865,28 @@ def render_sidebar() -> Dict[str, object]:
         is_salaried = st.checkbox("Is Salaried Individual?", value=True)
 
         st.divider()
-        st.subheader("1. AI Document Parser")
-        doc_file = st.file_uploader("Upload Form 16 / Salary Slip (PDF)", type=["pdf"], key="sb_doc")
+        st.subheader("1. AI Document Parser 🔒 CA Assist")
+        with st.expander("Unlock with CA Assist subscription", expanded=False):
+            sidebar_unlocked = render_ca_subscription_gate()
 
-        if doc_file is not None and st.button("Parse Document with AI", key="btn_parse_doc", use_container_width=True):
-            text = extract_pdf_full_text(doc_file)
-            with st.spinner("Extracting parameters with Gemini AI..."):
-                parsed, msg = ai_parse_document(text)
-            if parsed:
-                st.session_state["in_gross_salary"] = parsed["gross_salary"]
-                st.session_state["in_80c"] = parsed["sec_80c"]
-                st.session_state["in_80d"] = parsed["sec_80d"]
-                st.session_state["in_hra"] = parsed["hra_exemption"]
-                st.session_state["in_prepaid_tax"] = parsed["tds_deducted"]
-                st.success(f"{msg} ({parsed['employer_name']})")
-            else:
-                st.warning(msg)
+        if sidebar_unlocked:
+            doc_file = st.file_uploader("Upload Form 16 / Salary Slip (PDF)", type=["pdf"], key="sb_doc")
+
+            if doc_file is not None and st.button("Parse Document with AI", key="btn_parse_doc", use_container_width=True):
+                text = extract_pdf_full_text(doc_file)
+                with st.spinner("Extracting parameters with Gemini AI..."):
+                    parsed, msg = ai_parse_document(text)
+                if parsed:
+                    st.session_state["in_gross_salary"] = parsed["gross_salary"]
+                    st.session_state["in_80c"] = parsed["sec_80c"]
+                    st.session_state["in_80d"] = parsed["sec_80d"]
+                    st.session_state["in_hra"] = parsed["hra_exemption"]
+                    st.session_state["in_prepaid_tax"] = parsed["tds_deducted"]
+                    st.success(f"{msg} ({parsed['employer_name']})")
+                else:
+                    st.warning(msg)
+        else:
+            st.caption("Subscribe above to unlock automatic Form 16 parsing.")
 
         st.divider()
         st.subheader("2. Income & Exemptions")
@@ -885,16 +1092,19 @@ def main() -> None:
         st.subheader("3. CA AI Inspection Workbench")
         st.caption("Ask queries regarding Section 40A(3) disallowance risks, GST reconciliation, or unusual transaction spikes.")
 
-        audit_query = st.text_input(
-            "Enter Audit Query",
-            placeholder="e.g., Are there any disallowance risks u/s 40A(3) or high cash expenses?",
-            key="wb_audit_input",
-        )
+        workbench_unlocked = render_ca_subscription_gate()
 
-        if st.button("Execute Audit Inspection", key="btn_wb_audit", use_container_width=False):
-            with st.spinner("Analyzing ledger parameters with Gemini 2.5 Flash..."):
-                audit_res = ai_audit_ledger(transactions, audit_query)
-            st.markdown(f'<div class="status-box info">{escape(audit_res)}</div>', unsafe_allow_html=True)
+        if workbench_unlocked:
+            audit_query = st.text_input(
+                "Enter Audit Query",
+                placeholder="e.g., Are there any disallowance risks u/s 40A(3) or high cash expenses?",
+                key="wb_audit_input",
+            )
+
+            if st.button("Execute Audit Inspection", key="btn_wb_audit", use_container_width=False):
+                with st.spinner("Analyzing ledger parameters with Gemini 2.5 Flash..."):
+                    audit_res = ai_audit_ledger(transactions, audit_query)
+                st.markdown(f'<div class="status-box info">{escape(audit_res)}</div>', unsafe_allow_html=True)
 
     # -------------------------------------------------------------------------
     # TAB 4: Provenance Audit Log (Execution Pipeline)
