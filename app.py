@@ -8,6 +8,7 @@ Features:
 - Free AI Analysis via Google Gemini 2.5 Flash
 - Provenance Audit Trail & Live Execution Logs
 - Automated Razorpay Subscription & Local SQLite Persistence
+- Unique Key Namespaces to Prevent Streamlit Duplicate Key Errors
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ CATEGORY_RULES = {
 }
 
 REQUIRED_CHECKLIST = [
-    "PAN and Aadhaar linking verified",
+    "PAN verification completed",
     "Active bank account details with valid IFSC",
     "Form 16 (Part A & Part B) or monthly salary slips",
     "Annual Information Statement (AIS) / TIS cross-verification",
@@ -713,11 +714,11 @@ def check_payment_link_status(payment_link_id: str) -> Optional[str]:
         return None
 
 
-def render_ca_subscription_gate() -> bool:
+def render_ca_subscription_gate(key_prefix: str = "default") -> bool:
     """Renders the paywall UI. Returns True once the CA has an active subscription."""
     email = st.text_input(
         "Your email (used to check and activate your CA Assist subscription)",
-        key="ca_sub_email",
+        key=f"{key_prefix}_ca_sub_email",
     ).strip().lower()
 
     if not email:
@@ -740,7 +741,7 @@ def render_ca_subscription_gate() -> bool:
 
     st.warning(f"CA Assist tools need an active subscription - **{money(SUBSCRIPTION_PRICE_INR)}/month**.")
 
-    link_key = "ca_sub_payment_link"
+    link_key = f"{key_prefix}_ca_sub_payment_link"
     if st.session_state.get(f"{link_key}_email") != email:
         st.session_state.pop(link_key, None)
         st.session_state.pop(f"{link_key}_email", None)
@@ -760,7 +761,7 @@ def render_ca_subscription_gate() -> bool:
     st.markdown(f"**[Click here to pay {money(SUBSCRIPTION_PRICE_INR)} securely via Razorpay]({link_data['short_url']})**")
     st.caption("Card, UPI, and netbanking are all supported on the Razorpay page.")
 
-    if st.button("I've paid - check my status", key="btn_check_payment", use_container_width=True):
+    if st.button("I've paid - check my status", key=f"{key_prefix}_btn_check_payment", use_container_width=True):
         with st.spinner("Checking payment status..."):
             status = check_payment_link_status(link_data["id"])
         if status == "paid":
@@ -865,7 +866,7 @@ def render_sidebar() -> Dict[str, object]:
         st.divider()
         st.subheader("1. AI Document Parser 🔒 CA Assist")
         with st.expander("Unlock with CA Assist subscription", expanded=False):
-            sidebar_unlocked = render_ca_subscription_gate()
+            sidebar_unlocked = render_ca_subscription_gate(key_prefix="sidebar")
 
         if sidebar_unlocked:
             doc_file = st.file_uploader("Upload Form 16 / Salary Slip (PDF)", type=["pdf"], key="sb_doc")
@@ -1090,7 +1091,7 @@ def main() -> None:
         st.subheader("3. CA AI Inspection Workbench")
         st.caption("Ask queries regarding Section 40A(3) disallowance risks, GST reconciliation, or unusual transaction spikes.")
 
-        workbench_unlocked = render_ca_subscription_gate()
+        workbench_unlocked = render_ca_subscription_gate(key_prefix="tab3")
 
         if workbench_unlocked:
             audit_query = st.text_input(
