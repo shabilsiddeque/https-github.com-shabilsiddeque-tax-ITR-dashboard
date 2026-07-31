@@ -163,7 +163,7 @@ def generate_pdf_summary(
     pdf.cell(95, 6, f"Taxpayer Name: {profile.get('taxpayer_name', 'N/A')}", ln=False)
     pdf.cell(95, 6, f"Employment Status: {'Salaried' if profile.get('is_salaried') else 'Non-Salaried'}", ln=True)
     pdf.cell(95, 6, f"Date Generated: {date.today().strftime('%d %B %Y')}", ln=False)
-    
+
     best_regime = "New Tax Regime (u/s 115BAC)" if new_est.net_tax <= old_est.net_tax else "Old Tax Regime"
     pdf.cell(95, 6, f"Recommended Option: {best_regime}", ln=True)
     pdf.ln(4)
@@ -213,7 +213,7 @@ def generate_pdf_summary(
 
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(51, 65, 85)
-    
+
     for item in REQUIRED_CHECKLIST:
         status_text = "[ OK ] Verified" if item in checked_items else "[    ] Pending Verification"
         pdf.cell(140, 5, f"- {item}", ln=False)
@@ -545,10 +545,13 @@ def ai_audit_ledger(transactions: pd.DataFrame, query: str) -> str:
         return "Configure GEMINI_API_KEY in Secrets to activate CA AI Audit Assistant."
 
     try:
-        by_cat = transactions.groupby(["type", "category"])["absolute_amount"].sum().round(0).astype(int).to_dict()
+        by_cat_raw = transactions.groupby(["type", "category"])["absolute_amount"].sum().round(0).astype(int).to_dict()
+        by_cat = {f"{k[0]} / {k[1]}": v for k, v in by_cat_raw.items()}
+
         monthly = transactions.copy()
         monthly["month"] = pd.to_datetime(monthly["date"]).dt.to_period("M").astype(str)
-        m_summary = monthly.groupby(["month", "type"])["absolute_amount"].sum().round(0).astype(int).to_dict()
+        m_summary_raw = monthly.groupby(["month", "type"])["absolute_amount"].sum().round(0).astype(int).to_dict()
+        m_summary = {f"{k[0]} / {k[1]}": v for k, v in m_summary_raw.items()}
 
         summary_data = {
             "total_records": len(transactions),
@@ -587,7 +590,7 @@ def configure_page() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    
+
     st.markdown(
         """
         <style>
@@ -956,4 +959,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
