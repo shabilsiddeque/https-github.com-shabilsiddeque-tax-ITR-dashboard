@@ -7,6 +7,7 @@ Features:
 - Old vs New Tax Regime Calculation Engine (FY 2025-26 / AY 2026-27)
 - Free AI Analysis via Google Gemini 2.5 Flash
 - Provenance Audit Trail & Live Execution Logs
+- Automated Razorpay Subscription & Local SQLite Persistence
 """
 
 from __future__ import annotations
@@ -29,6 +30,14 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from fpdf import FPDF
+
+# Try importing Google GenAI SDK
+try:
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
+except ImportError:
+    GENAI_AVAILABLE = False
 
 
 # =============================================================================
@@ -454,13 +463,14 @@ def calculate_old_regime_tax(
 # =============================================================================
 
 def get_gemini_client():
+    if not GENAI_AVAILABLE:
+        return None
     api_key = st.secrets.get("GEMINI_API_KEY", None) or os.environ.get("GEMINI_API_KEY", None)
     if not api_key:
         return None
     try:
-        from google import genai
         return genai.Client(api_key=api_key)
-    except ModuleNotFoundError:
+    except Exception:
         return None
 
 
@@ -473,8 +483,6 @@ def ai_parse_document(doc_text: str) -> Tuple[Optional[Dict[str, float]], str]:
         return None, "GEMINI_API_KEY is not configured in Secrets."
 
     try:
-        from google.genai import types
-
         prompt = f"""
         Extract key Indian Income Tax fields from this document text.
         Return ONLY a JSON object with these exact numeric keys:
@@ -552,6 +560,7 @@ def ai_audit_ledger(transactions: pd.DataFrame, query: str) -> str:
         return "Configure GEMINI_API_KEY in Secrets to activate CA AI Audit Assistant."
 
     try:
+        # Stringify tuple multi-index keys to prevent JSON serialization errors
         by_cat_raw = transactions.groupby(["type", "category"])["absolute_amount"].sum().round(0).astype(int).to_dict()
         by_cat = {f"{k[0]} / {k[1]}": v for k, v in by_cat_raw.items()}
 
@@ -588,17 +597,6 @@ def ai_audit_ledger(transactions: pd.DataFrame, query: str) -> str:
 
 # =============================================================================
 # CA Assist Subscription Engine (Razorpay Payment Links)
-#
-# Zero manual work by design: a CA clicks "Subscribe", pays via a
-# Razorpay-hosted Payment Link (card/UPI/netbanking), and the app itself
-# polls Razorpay's API to confirm payment and unlock access - nobody has to
-# check a bank statement or hand out access codes by hand.
-#
-# One-time setup required (not recurring effort):
-#   1. Create a free Razorpay account at razorpay.com (test mode needs no KYC).
-#   2. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to Streamlit Secrets.
-# Until those secrets are set, the paywall shows a "not configured yet"
-# message instead of breaking the app.
 # =============================================================================
 
 def get_razorpay_keys() -> Tuple[Optional[str], Optional[str]]:
@@ -1133,7 +1131,6 @@ def main() -> None:
         col_dl1, col_dl2 = st.columns(2)
 
         with col_dl1:
-            # Generate PDF dynamically on button click to prevent premature encoding errors
             pdf_data = generate_pdf_summary(
                 profile=profile,
                 new_est=new_regime_est,
